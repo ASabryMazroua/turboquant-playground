@@ -94,6 +94,42 @@ def test_sink_tokens_kept_exact():
     assert sink_err < nosink_err
 
 
+def test_per_channel_keys_beat_per_token_on_channel_outlier():
+    # Keys have persistent *channel* outliers. Per-token key quant lets one
+    # outlier channel inflate every token's scale (our M4 failure mode); a
+    # per-channel scale gives that channel its own range. So per-channel key
+    # reconstruction must be more accurate than per-token on outlier-channel keys.
+    torch.manual_seed(0)
+    B, H, T, D = 1, 2, 300, 64
+    k = torch.randn(B, H, T, D, dtype=torch.bfloat16)
+    k[:, :, :, 7] = k[:, :, :, 7] * 12.0  # one heavy outlier channel
+    v = torch.randn(B, H, T, D, dtype=torch.bfloat16)
+
+    def recon_relerr(key_quant):
+        c = TurboKVCache(residual_length=32, rotation="none", head_dim=D,
+                         key_quant=key_quant, key_group_size=32)
+        fk, _ = c.update(k.clone(), v.clone(), 0)
+        assert fk.shape == k.shape
+        return float((fk.float() - k.float()).norm() / k.float().norm())
+
+    err_per_token = recon_relerr("per_token")
+    err_per_channel = recon_relerr("per_channel")
+    assert err_per_channel < err_per_token
+
+
+def test_per_channel_decode_token_by_token():
+    # Group-aligned eviction must keep token-by-token decode correct and bounded.
+    cache = TurboKVCache(residual_length=16, rotation="none", head_dim=64,
+                         key_quant="per_channel", key_group_size=8)
+    k0, v0 = _rand_kv(T=40)
+    cache.update(k0, v0, 0)
+    for _ in range(20):
+        k, v = _rand_kv(T=1)
+        fk, fv = cache.update(k, v, 0)
+    assert cache.get_seq_length(0) == 60
+    assert fk.shape[2] == 60
+
+
 def test_memory_is_roughly_4x_smaller_than_bf16():
     # Long context, small window → compressed store dominates → ≈4× reduction.
     cache = TurboKVCache(residual_length=8, rotation="dense", head_dim=64)

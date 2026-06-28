@@ -31,3 +31,6 @@ models/
 
 # Blob-download scratch (artifacts are downloaded here then copied into results/)
 results/_*
+
+# Local-only AML job specs that carry real subscription/resource IDs (never commit)
+*.local.yml

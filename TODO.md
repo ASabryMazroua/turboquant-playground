@@ -93,8 +93,16 @@ Legend: ⬜ not started · 🟡 in progress · 🔵 awaiting Codex review · ✅
 - [x] Tables: MSE-only vs prod (IP-bias/RMSE/attn-KL) → `m6_prod.md`
 - [x] Log runs (`magenta_pen…` 1-bit, `sharp_drawer…` m-sweep PASS) → key finding: QJL validates unbiased-IP claim + extends Pareto, at a memory cost
 
-## Final — Portfolio README  ⬜
-- [ ] Fill PLAN Section 11 table with real numbers
-- [ ] Embed the bits×quality×memory Pareto scatter as the README hero image
-- [ ] Write thesis + "what worked / what didn't" retro
-- [ ] Link all job URLs + CSVs + key plots/traces
+## M7 — The redemption: per-channel keys (KIVI fix)  ✅ (gate PASS)
+- [x] Root-caused M4's 15–57× WikiText blowup via field research (KIVI/KVQuant/QJL): **per-token key quant was our mistake**; keys have outlier *channels*
+- [x] `turbo_kv/packing.py` `quantize_int4_per_channel`; `TurboKVCache` `key_quant`/`key_group_size` (per-channel keys, group-aligned eviction); values stay per-token
+- [x] Tests: `test_per_channel_keys_beat_per_token_on_channel_outlier`, `test_per_channel_decode_token_by_token` (pytest 19/19)
+- [x] **Gate PASS:** per-channel int4 KV ppl_ratio **1.017/1.034/1.007×** at ctx 4k/8k/16k on WikiText (was 15.6/47.3/55.7×) — **15–55× better, near-lossless**, even post-RoPE
+- [x] Plot `m7_per_channel_fix` + `m7_per_channel` table + `m7_gate.md`; run `epic_pear_1kpc0vwhp8`; README Finding 5 (redemption) + thesis updated
+- [ ] Next (optional): pre-RoPE key quant (KVQuant) + real QJL key sketch (m=256) — then the **retrieval** pivot (TurboQuant vs Product Quantization on ANN, in the paper)
+
+## Final — Portfolio README  ✅ (live)
+- [x] Compelling undergrad-level story with 5 findings incl. the redemption; thesis written
+- [x] Embedded plots (`m2_axis_contrast`, `m4_corpus_comparison`, `m6_ip_bias_hist`, `m6_pareto`, `m5_decode`, `m7_per_channel_fix`)
+- [x] Scrubbed secrets, MIT LICENSE, requirements.txt, reproducible (`report_*.py` rebuild plots on CPU); pushed to github.com/ASabryMazroua/turboquant-playground
+- [ ] Optional: fill PLAN §11 master table; add retrieval chapter

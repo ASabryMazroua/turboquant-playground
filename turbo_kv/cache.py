@@ -44,16 +44,26 @@ class TurboKVCache(_try_cache_base()):
         bits: int = 4,
         seed: int = 0,
         sink_length: int = 0,
+        key_quant: str = "per_token",
+        key_group_size: int = 32,
     ) -> None:
         super().__init__()
         if bits != 4:
             raise ValueError("TurboKVCache MVP supports int4 only (bits=4)")
+        if key_quant not in ("per_token", "per_channel"):
+            raise ValueError("key_quant must be 'per_token' or 'per_channel'")
         self.residual_length = int(residual_length)
         self.rotation_kind = rotation
         self.head_dim = int(head_dim)
         self.bits = int(bits)
         self.seed = int(seed)
         self.sink_length = int(sink_length)
+        # Key quantization axis: per-token (original) or per-channel (KIVI-style,
+        # the fix for outlier key channels). Values stay per-token. Per-channel
+        # keys are quantized over blocks of ``key_group_size`` evicted tokens.
+        self.key_quant = key_quant
+        self.key_group_size = int(key_group_size)
+        self._key_axis = "channel" if key_quant == "per_channel" else "token"
 
         self._rot: Optional[R.Rotation] = None  # built lazily on first update
         # Per-layer compressed store (packed codes + per-token scale/zero).
@@ -87,31 +97,50 @@ class TurboKVCache(_try_cache_base()):
                 self.rotation_kind, self.head_dim, seed=self.seed, device=device, dtype=dtype
             )
 
-    def _compress(self, x):
-        """[B,H,T,D] BF16 → packed int4 dict (rotate → per-token quant → pack)."""
+    def _compress(self, x, axis: str = "token"):
+        """[B,H,T,D] BF16 → packed int4 dict (rotate → quant → pack).
+
+        ``axis='token'`` (one scale per token) or ``'channel'`` (one scale per
+        coordinate over the whole evicted block — the KIVI key scheme).
+        """
         import torch
 
         xr = self._rot.rotate(x.to(torch.float32))
+        if axis == "channel":
+            codes, scale, lo = P.quantize_int4_per_channel(xr)   # scale/lo [B,H,1,D]
+            return {
+                "packed": P.pack_int4(codes),
+                "scale": scale.to(torch.bfloat16),
+                "lo": lo.to(torch.bfloat16),
+                "sizes": [x.shape[2]],
+                "T": x.shape[2],
+                "D": x.shape[3],
+                "axis": "channel",
+            }
         codes, scale, lo = P.quantize_int4_per_token(xr)
-        packed = P.pack_int4(codes)
         return {
-            "packed": packed,
+            "packed": P.pack_int4(codes),
             "scale": scale.to(torch.bfloat16),
             "lo": lo.to(torch.bfloat16),
             "T": x.shape[2],
             "D": x.shape[3],
+            "axis": "token",
         }
 
     def _decompress(self, store, out_dtype):
         """Packed int4 dict → [B,H,T,D] reconstruction (unpack → dequant → inv-rot)."""
         import torch
 
-        codes = P.unpack_int4(store["packed"], store["D"])
-        deq = P.dequantize_int4_per_token(
-            codes.to(torch.float32),
-            store["scale"].to(torch.float32),
-            store["lo"].to(torch.float32),
-        )
+        codes = P.unpack_int4(store["packed"], store["D"]).to(torch.float32)
+        if store.get("axis") == "channel":
+            # expand each block's per-channel scale [B,H,n_blocks,D] over its tokens.
+            sizes = torch.tensor(store["sizes"], device=codes.device)
+            scale = store["scale"].to(torch.float32).repeat_interleave(sizes, dim=2)
+            lo = store["lo"].to(torch.float32).repeat_interleave(sizes, dim=2)
+            deq = codes * scale + lo
+        else:
+            deq = P.dequantize_int4_per_token(
+                codes, store["scale"].to(torch.float32), store["lo"].to(torch.float32))
         rec = self._rot.inverse(deq)  # float32, orthogonal inverse
         return rec.to(out_dtype)
 
@@ -121,12 +150,23 @@ class TurboKVCache(_try_cache_base()):
 
         if dst is None:
             return src
+        if src.get("axis") == "channel":
+            return {
+                "packed": torch.cat([dst["packed"], src["packed"]], dim=2),
+                "scale": torch.cat([dst["scale"], src["scale"]], dim=2),
+                "lo": torch.cat([dst["lo"], src["lo"]], dim=2),
+                "sizes": dst["sizes"] + src["sizes"],
+                "T": dst["T"] + src["T"],
+                "D": dst["D"],
+                "axis": "channel",
+            }
         return {
             "packed": torch.cat([dst["packed"], src["packed"]], dim=2),
             "scale": torch.cat([dst["scale"], src["scale"]], dim=2),
             "lo": torch.cat([dst["lo"], src["lo"]], dim=2),
             "T": dst["T"] + src["T"],
             "D": dst["D"],
+            "axis": "token",
         }
 
     # ------------------------------------------------------------------ #
@@ -151,7 +191,13 @@ class TurboKVCache(_try_cache_base()):
         wV = value_states if self._wV[layer_idx] is None else torch.cat([self._wV[layer_idx], value_states], dim=2)
 
         # 2) evict the oldest overflow tokens into the compressed store.
-        n_evict = wK.shape[2] - self.residual_length
+        n_overflow = wK.shape[2] - self.residual_length
+        # per-channel keys evict in whole ``key_group_size`` blocks so each block's
+        # per-channel scale sees real token statistics, not a single decode token.
+        if self.key_quant == "per_channel" and n_overflow > 0:
+            n_evict = (n_overflow // self.key_group_size) * self.key_group_size
+        else:
+            n_evict = n_overflow
         if n_evict > 0:
             evK = wK[:, :, :n_evict, :]
             evV = wV[:, :, :n_evict, :]
@@ -166,8 +212,8 @@ class TurboKVCache(_try_cache_base()):
                     self._sV[layer_idx] = sV if self._sV[layer_idx] is None else torch.cat([self._sV[layer_idx], sV], dim=2)
                     evK, evV = evK[:, :, take:, :], evV[:, :, take:, :]
             if evK.shape[2] > 0:
-                self._cK[layer_idx] = self._append_store(self._cK[layer_idx], self._compress(evK))
-                self._cV[layer_idx] = self._append_store(self._cV[layer_idx], self._compress(evV))
+                self._cK[layer_idx] = self._append_store(self._cK[layer_idx], self._compress(evK, self._key_axis))
+                self._cV[layer_idx] = self._append_store(self._cV[layer_idx], self._compress(evV, "token"))
             wK = wK[:, :, n_evict:, :].contiguous()
             wV = wV[:, :, n_evict:, :].contiguous()
         self._wK[layer_idx] = wK

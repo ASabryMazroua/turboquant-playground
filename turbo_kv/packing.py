@@ -59,3 +59,24 @@ def quantize_int4_per_token(x):
 def dequantize_int4_per_token(codes, scale, lo):
     """Inverse of :func:`quantize_int4_per_token` → float32 reconstruction."""
     return codes.to(scale.dtype) * scale + lo
+
+
+def quantize_int4_per_channel(x):
+    """Per-**channel** affine quant of ``x`` ``[..., T, D]`` → ``(codes, scale, lo)``.
+
+    The scale/zero are computed per coordinate (channel) over the token dim, so
+    ``scale``/``lo`` keep shape ``[..., 1, D]``. This is the KIVI key-cache scheme:
+    keys have persistent *channel* outliers, and a per-channel scale gives each
+    outlier channel its own range instead of letting it inflate a whole token's
+    scale (the failure mode of per-token key quantization). Dequant reuses
+    :func:`dequantize_int4_per_token` (the ``codes*scale+lo`` formula broadcasts).
+    """
+    import torch
+
+    x = x.to(torch.float32)
+    lo = x.amin(dim=-2, keepdim=True)
+    hi = x.amax(dim=-2, keepdim=True)
+    scale = ((hi - lo) / (INT4_LEVELS - 1)).clamp_min(1e-8)
+    codes = torch.clamp(torch.round((x - lo) / scale), 0, INT4_LEVELS - 1).to(torch.uint8)
+    return codes, scale, lo
+

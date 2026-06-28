@@ -4,9 +4,10 @@
 > stress‑testing its core idea on a *real* language model (Qwen2.5‑0.5B) on a *real* A100 GPU.
 > Along the way I found a textbook "your benchmark is lying to you" trap, confirmed the paper's most
 > subtle claim (that minimizing reconstruction error is **not** the same as preserving attention),
-> and learned why a clever int4 GPU kernel can be *correct, memory‑saving, and still 12–48× slower*
-> than just doing the boring thing. Every number below was measured, and every plot regenerates from
-> committed data.
+> learned why a clever int4 GPU kernel can be *correct, memory‑saving, and still 12–48× slower* than
+> just doing the boring thing — and then **turned a 55× failure into a 1.01× near‑lossless result** by
+> reading what the methods that actually work do differently. Every number below was measured, and
+> every plot regenerates from committed data.
 
 This repo is a **portfolio / lab notebook**, not a library you should deploy. The goal is to *show
 the work*: the wins, the dead‑ends, the bugs, and the honest negative results.
@@ -108,6 +109,9 @@ question for the paper's residual trick.
 > Repetition + induction heads can mask almost any KV damage. Always test on held‑out, non‑repeating
 > data. (This single check changed the project's entire conclusion.)
 
+> ⚠️ **But hold that thought.** Was per‑token int4 KV actually doomed — or did *we* do it wrong? The
+> answer (it was us) is the redemption in **Finding 5**.
+
 ### Finding 3 — MSE‑optimal ≠ inner‑product‑optimal (the paper was right)
 
 Here's the subtle claim made concrete. I quantized real Qwen keys and looked at the **signed error**
@@ -156,18 +160,49 @@ launch/occupancy‑bound, not bandwidth‑bound.
 > faster. Beating cuBLAS needs real int4 tensor‑core kernels (Marlin/Machete‑class), which is a
 > different project. Reporting this honestly is the whole point.
 
+### Finding 5 — The redemption: it was our mistake, and here's the fix
+
+Finding 2's headline — 4‑bit KV is **15–57× worse** — was real and correctly measured. But then I went
+and read what the methods that *actually work* (KIVI, KVQuant, and TurboQuant's own QJL implementation)
+do differently, and the answer was humbling: **they quantize keys *per channel*; we quantized *per
+token*.**
+
+Keys have persistent outlier **channels** — a few coordinates that are large for almost every token. A
+*per‑token* scale (one range per row) lets a single outlier channel blow up the whole token's range,
+crushing the other 63 coordinates toward zero. A *per‑channel* scale (one range per column) gives that
+outlier channel its own range and leaves the rest intact. So I added a per‑channel key mode and reran
+the **exact same WikiText eval**:
+
+![per-channel keys fix](results/plots/m7_per_channel_fix.png)
+
+| context | per‑token keys (our mistake) | **per‑channel keys (the fix)** | improvement |
+| --- | --- | --- | --- |
+| 4k | 15.6× | **1.02×** | 15× |
+| 8k | 47.3× | **1.03×** | 46× |
+| 16k | 55.7× | **1.01×** | 55× |
+
+One principled change takes int4 KV from **15–57× worse** to **near‑lossless (≈1.01–1.03×)** — and we
+got there even though we still quantize *post*‑RoPE (KVQuant shows pre‑RoPE would help further). The
+earlier negative result wasn't a dead end; it was a controlled demonstration of *why* the entire field
+quantizes keys per channel.
+
+> **Lesson:** a negative result is only as trustworthy as your grasp of the baseline. Before concluding
+> "X doesn't work," check how the people who got X to work actually did it. Here the bug wasn't int4 —
+> it was *me*, and three papers' worth of design choices turned a 55× failure into a 1.01× success.
+
 ---
 
 ## 5. The one‑paragraph thesis
 
-Rotating KV vectors before quantizing genuinely helps **per‑token** 4‑bit storage (Finding 1), and
-its real payoff is **memory**: ~3–3.5× smaller KV in practice (close to the 4× ideal). But 4‑bit
-storage alone is **not** quality‑safe on real text (Finding 2), because the MSE‑optimal quantizer is
-*biased* for the dot products attention actually uses — and the paper's **1‑bit QJL residual**
-provably and measurably removes that bias, unlocking a quality regime plain quantization can't reach
-(Finding 3). The catch the paper doesn't dwell on: at small head dimensions the compute is so cuBLAS‑
-friendly that a fused int4 kernel saves memory but loses on latency (Finding 4). **MSE‑optimal ≠
-inner‑product‑optimal** is the idea that ties it all together.
+Rotating KV vectors before quantizing helps **per‑token** 4‑bit storage (Finding 1), and the real
+payoff is **memory**: ~3–3.5× smaller KV (close to the 4× ideal). Our first end‑to‑end attempt looked
+catastrophic — 4‑bit KV was 15–57× worse perplexity on real text (Finding 2) — but that turned out to
+be **our own design mistake**: quantizing keys *per token*. Doing it the field's way, **per channel**,
+recovers near‑lossless int4 KV (≈1.01×, Finding 5). Separately, the MSE‑optimal quantizer is *biased*
+for the dot products attention actually uses, and the paper's **1‑bit QJL residual** provably and
+measurably removes that bias (Finding 3). The one catch: at small head dimensions the compute is so
+cuBLAS‑friendly that a fused int4 kernel saves memory but loses on latency (Finding 4). **MSE‑optimal ≠
+inner‑product‑optimal** — and **quantize keys per channel** — are the two ideas that tie it together.
 
 ## 6. Reproduce it
 

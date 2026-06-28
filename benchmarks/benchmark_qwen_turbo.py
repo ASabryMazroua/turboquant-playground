@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import itertools
 import math
 import os
 import sys
@@ -314,6 +315,8 @@ def main() -> int:
     ap.add_argument("--residual-length", type=int, default=128)
     ap.add_argument("--sink-lengths", default="0",
                     help="comma list of BF16 attention-sink token counts to sweep")
+    ap.add_argument("--key-quants", default="per_token",
+                    help="comma list of key quant axes: per_token and/or per_channel (KIVI)")
     ap.add_argument("--corpus", default="synthetic",
                     help="'synthetic' (tiled + held-out eval) or 'wikitext' (real prose)")
     ap.add_argument("--out-dir", default="outputs")
@@ -336,8 +339,9 @@ def main() -> int:
     contexts = [int(x) for x in args.contexts.split(",")]
     rotations = [r.strip() for r in args.rotations.split(",")]
     sink_lengths = [int(s) for s in args.sink_lengths.split(",")]
+    key_quants = [k.strip() for k in args.key_quants.split(",")]
     print(f"model: layers={nL} kv_heads={nKV} head_dim={D} residual_length={rl} "
-          f"sinks={sink_lengths}")
+          f"sinks={sink_lengths} key_quants={key_quants}")
     corpus_ids = load_corpus_ids(tok, args.corpus)
     if corpus_ids is not None:
         print(f"corpus={args.corpus}: {corpus_ids.shape[1]} tokens")
@@ -370,10 +374,10 @@ def main() -> int:
                 reporting.append_row(layer_csv, dict(ctx=ctx, rotation=rot, layer=li,
                                                      attn_out_relerr=round(rel, 6)))
 
-            for sink in sink_lengths:
+            for sink, kq in itertools.product(sink_lengths, key_quants):
                 def make_turbo_cache():
                     return TurboKVCache(residual_length=rl, rotation="none",
-                                        head_dim=D, bits=4, sink_length=sink)
+                                        head_dim=D, bits=4, sink_length=sink, key_quant=kq)
 
                 turbo_logits, _ = teacher_forced_window(model, make_turbo_cache, input_ids, W)
                 n_nonfinite = int((~torch.isfinite(turbo_logits)).sum())
@@ -384,13 +388,13 @@ def main() -> int:
                 ppl_turbo = window_perplexity(turbo_logits, targets)
                 turbo_ms, turbo_peak = decode_latency(model, input_ids, args.steps, make_turbo_cache)
 
-                if not ops_done and rot == "rht" and sink == sink_lengths[0]:
+                if not ops_done and rot == "rht" and sink == sink_lengths[0] and kq == key_quants[0]:
                     profile_decode_ops(model, input_ids, make_turbo_cache, ops_csv)
                     ops_done = True
 
                 reporting.append_row(e2e_csv, dict(
                     ctx=ctx, rotation=rot, residual_length=rl, sink_length=sink,
-                    corpus=args.corpus, eval_tokens=W,
+                    key_quant=kq, corpus=args.corpus, eval_tokens=W,
                     tf_kl=round(kls["tf_kl"], 6), tf_kl_median=round(kls["tf_kl_median"], 6),
                     tf_kl_p95=round(kls["tf_kl_p95"], 6), tf_argmax_match=round(argmax_match, 4),
                     n_nonfinite=n_nonfinite,
@@ -399,7 +403,7 @@ def main() -> int:
                     decode_ms_bf16=round(bf16_ms, 3), decode_ms_turbo=round(turbo_ms, 3),
                     peak_mb_bf16=round(bf16_peak, 1), peak_mb_turbo=round(turbo_peak, 1),
                 ))
-                print(f"[m4] ctx={ctx} {rot:5s} sink={sink}: tf_kl={kls['tf_kl']:.3e} "
+                print(f"[m7] ctx={ctx} {rot:5s} sink={sink} key={kq}: tf_kl={kls['tf_kl']:.3e} "
                       f"(med {kls['tf_kl_median']:.3e}) match={argmax_match:.3f} "
                       f"ppl_ratio={ppl_turbo / ppl_bf16:.3f} "
                       f"decode {turbo_ms:.2f}ms (bf16 {bf16_ms:.2f})")
