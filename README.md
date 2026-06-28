@@ -6,8 +6,9 @@
 > subtle claim (that minimizing reconstruction error is **not** the same as preserving attention),
 > learned why a clever int4 GPU kernel can be *correct, memory‑saving, and still 12–48× slower* than
 > just doing the boring thing — and then **turned a 55× failure into a 1.01× near‑lossless result** by
-> reading what the methods that actually work do differently. Every number below was measured, and
-> every plot regenerates from committed data.
+> reading what the methods that actually work do differently. Then I implemented the field's full
+> eight‑step recipe and found **three independent ways** to rescue the same failure. Every number below
+> was measured, and every plot regenerates from committed data.
 
 This repo is a **portfolio / lab notebook**, not a library you should deploy. The goal is to *show
 the work*: the wins, the dead‑ends, the bugs, and the honest negative results.
@@ -67,7 +68,7 @@ single **A100‑80GB**. Each experiment is one GPU job; results are downloaded a
 
 ---
 
-## 4. Four findings worth your time
+## 4. Six findings worth your time
 
 ### Finding 1 — Rotation only helps if you quantize *per token*
 
@@ -192,6 +193,52 @@ quantizes keys per channel.
 
 ---
 
+### Finding 6 — The field's whole toolbox (and *three* ways to fix one bug)
+
+Finding 5 fixed the 55× disaster one way — per‑channel keys. But that is only the first item on the
+field's checklist. So I implemented the **other seven refinements** that KIVI, KVQuant, and QJL stack on
+top, and validated each on the A100 (one even crashed first — a missing `import torch` in a rarely‑hit
+branch that `py_compile` can't catch; the run found it, I fixed it, reran). The punchline: there are at
+least **three independent ways** to rescue the *exact* per‑token int4 setting that failed in Finding 2.
+
+![keeping the outlier layer in BF16](results/plots/m9_early_layer_bits.png)
+
+| rescue (all on the same per‑token int4 that was 55× worse) | idea (source) | 16k perplexity ratio |
+| --- | --- | --- |
+| per‑channel keys | KIVI | **55.7× → 1.01×** |
+| keep just **layer 0** in BF16 | per‑layer bit allocation (QJL) | **55.7× → 1.34×** |
+| keep **8 fp16 outlier coords** per key | dense‑and‑sparse (KVQuant) | **55.7× → 2.27×** |
+
+The middle row is my favourite: my very first experiment (Finding 1) had flagged **layer 0** as a wild
+outlier (inner‑product error 1565 vs ~250 elsewhere). Months later, keeping *only that one layer* in
+full precision — 1 of 24 — drops per‑token int4 from 55× to 1.34×. The data told me which layer mattered
+long before I knew what to do with it.
+
+The rest of the toolbox, measured honestly:
+
+- **Pre‑RoPE keys** (KVQuant): quantizing the key *before* the rotary embedding, then re‑applying RoPE
+  on read‑back, lowers attention‑KL at long context (16k: 0.063 → 0.038). RoPE smears the per‑channel
+  statistics; quantize underneath it.
+- **A few BF16 "sink" tokens** (StreamingLLM): keeping the first 4–16 tokens exact trims per‑channel KL
+  a further ~2× (4k: 0.027 → 0.011) — a cheap complement. On its own it does **not** fix per‑token int4
+  (reproducing the Finding‑2 era result).
+- **Non‑uniform quantization** (KVQuant): k‑means reconstruction levels cut key MSE **4–6×** vs a uniform
+  grid… and attention‑KL **doesn't follow**. That is **MSE ≠ inner‑product, for the third time** — NUQ
+  optimizes exactly the objective Finding 3 says is the wrong one.
+- **QJL, done right** (QJL): my Finding‑3 sketch was undersized; the real method sketches the key
+  *directly* with a large sign‑sketch, and its error falls as 1/m, beating my 1‑bit version — but it
+  costs 8+ bits/value, so for a 64‑dim KV head per‑channel int4 is simply cheaper. QJL earns its keep in
+  the *retrieval* regime where you can't store per‑channel scales.
+- **A tensor‑core int4 kernel**: reconstructing the key tile to bf16 *in‑SRAM* and using the tensor
+  cores finally beats my Finding‑4 kernel by **1.2–1.3×** at every shape — yet cuBLAS bf16 still wins.
+  Finding 4 stands: at `head_dim=64`, int4 is a *memory* play, not a *speed* one.
+
+> **Lesson:** the field's recipe isn't one clever trick — it's a **stack** of refinements, and several of
+> them *independently* rescue the same failure. Reproducing a paper means reproducing its whole
+> checklist, not just its headline equation.
+
+---
+
 ## 5. The one‑paragraph thesis
 
 Rotating KV vectors before quantizing helps **per‑token** 4‑bit storage (Finding 1), and the real
@@ -203,6 +250,10 @@ for the dot products attention actually uses, and the paper's **1‑bit QJL resi
 measurably removes that bias (Finding 3). The one catch: at small head dimensions the compute is so
 cuBLAS‑friendly that a fused int4 kernel saves memory but loses on latency (Finding 4). **MSE‑optimal ≠
 inner‑product‑optimal** — and **quantize keys per channel** — are the two ideas that tie it together.
+Pushing through the field's full recipe (Finding 6) drove both home: *three* independent changes —
+per‑channel keys, keeping the one outlier layer in BF16, or a handful of fp16 outlier coordinates — each
+turn the 55× failure near‑lossless, while non‑uniform quantization cutting reconstruction error *without*
+helping attention is the MSE≠inner‑product lesson a third time.
 
 ## 6. Reproduce it
 
@@ -219,6 +270,10 @@ python benchmarks/report_m2.py  # rebuilds results/plots/m2_*.png from results/*
 python benchmarks/report_m4.py  #   …m4 (corpus comparison, sink sweep)
 python benchmarks/report_m5.py  #   …m5 (kernel latency, memory)
 python benchmarks/report_m6.py  #   …m6 (IP-bias histogram, Pareto)
+python benchmarks/report_m7.py  #   …m7 (per-channel keys: the redemption)
+python benchmarks/report_m9.py  #   …m9 (one BF16 layer rescues per-token int4)
+python benchmarks/report_m10.py #   …m10 (8 fp16 outliers rescue per-token int4)
+# report_m8/m11/m12/m13/m14/m15 likewise rebuild their plots from results/*.csv
 ```
 
 **B. On an A100 (or any CUDA GPU) — regenerate the raw results:**

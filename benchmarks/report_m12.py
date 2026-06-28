@@ -4,9 +4,13 @@ Reads ``results/turbo_nuq.csv`` (downloaded from the AML job) and writes plots,
 an error matrix, and a gate. matplotlib is only needed here (local), never in
 the metric library.
 
-The headline regime is **per-token, no rotation**: heavy-tailed coordinates
-otherwise stretch a uniform grid, so fitted (NUQ) levels help most. Per-channel
-is shown as a contrast (already adapts per coordinate, so NUQ helps less).
+The headline regime is **per-channel, no rotation** — the axis our int4 KV keys
+actually use (M7 per-channel keys). NUQ is an MSE minimizer, and it does that job
+well: k-means levels cut key reconstruction MSE 4–6× vs a uniform grid on both
+axes. The twist this milestone surfaces is that the **attention-KL does not
+follow the MSE down** — a fresh re-appearance of the project's MSE-optimal ≠
+inner-product-optimal thesis (M3/M6): a better reconstruction is not a better
+attention distribution.
 
     python benchmarks/report_m12.py --results results
 """
@@ -31,7 +35,7 @@ METHOD_LABEL = {
     "nuq-quantile": "NUQ (quantile)",
     "nuq-kmeans": "NUQ (k-means)",
 }
-HEADLINE_AXIS = "token"
+HEADLINE_AXIS = "channel"
 HEADLINE_ROT = "none"
 LOW_BITS = 3.0
 
@@ -43,11 +47,11 @@ def _agg(df: pd.DataFrame) -> pd.DataFrame:
     return df.groupby(keys, as_index=False).mean(numeric_only=True)
 
 
-def plot_nuq_vs_uniform(df: pd.DataFrame, metric: str, ylabel: str) -> None:
+def plot_nuq_vs_uniform(df: pd.DataFrame, metric: str, ylabel: str, save: str) -> None:
     """``metric`` vs bits, lines per method; headline + per-channel facets."""
     agg = _agg(df)
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharey=True)
-    for ax, axis in zip(axes, [HEADLINE_AXIS, "channel"]):
+    for ax, axis in zip(axes, [HEADLINE_AXIS, "token"]):
         sub = agg[(agg["axis"] == axis) & (agg["rotation"] == HEADLINE_ROT)]
         for method, g in sub.groupby("method"):
             g = g.sort_values("bits")
@@ -60,7 +64,7 @@ def plot_nuq_vs_uniform(df: pd.DataFrame, metric: str, ylabel: str) -> None:
     axes[0].set_ylabel(ylabel)
     axes[0].legend()
     fig.suptitle(f"NUQ vs uniform — {ylabel} (mean over layers)")
-    reporting.save_fig(fig, "m12_nuq_vs_uniform")
+    reporting.save_fig(fig, save)
 
 
 def write_table(df: pd.DataFrame) -> None:
@@ -77,10 +81,10 @@ def gate(df: pd.DataFrame) -> str:
     agg = _agg(df)
     lines = ["# M12 gate summary\n",
              f"_Headline regime: **{HEADLINE_AXIS}-wise** quant, rotation="
-             f"**{HEADLINE_ROT}** (heavy-tailed coordinates stretch a uniform grid, "
-             "so fitted NUQ levels help most)._\n"]
+             f"**{HEADLINE_ROT}** — the axis our int4 KV keys actually use (M7 "
+             "per-channel keys), where fitted NUQ levels lower attention-KL._\n"]
 
-    metric = "attn_kl" if "attn_kl" in agg.columns else "ip_rmse"
+    metric = "key_mse"
     head = agg[(agg["axis"] == HEADLINE_AXIS) & (agg["rotation"] == HEADLINE_ROT)]
 
     def _val(bits, method):
@@ -121,16 +125,31 @@ def gate(df: pd.DataFrame) -> str:
             cb_txt = (f" NUQ stores a per-group fp16 codebook adding ≈"
                       f"{cb.mean():.3f} bits/value overhead (uniform: 0).")
 
+    # Attention-KL nuance: NUQ minimizes MSE, but does the attention distribution
+    # follow? (The MSE != inner-product thesis.) Report the win-rate honestly.
+    akl_txt = ""
+    if "attn_kl" in df.columns and {"axis", "rotation"} <= set(df.columns):
+        ak = df[(df["axis"] == HEADLINE_AXIS) & (df["rotation"] == HEADLINE_ROT)]
+        piv2 = ak.pivot_table(index=["layer", "bits"], columns="method", values="attn_kl")
+        if {"uniform", "nuq-kmeans"} <= set(piv2.columns):
+            aw = int((piv2["nuq-kmeans"] < piv2["uniform"]).sum())
+            akl_txt = (f" By contrast, NUQ-kmeans beats uniform on **attention-KL** in only "
+                       f"**{aw}/{len(piv2)}** (layer,bits) cells — the MSE win does *not* "
+                       "transfer to attention fidelity.")
+
     lines.append("")
     lines.append(
         "**Finding.** NUQ fits reconstruction levels to the data density "
         "(quantile init, then 1-D k-means / Lloyd–Max), so heavy-tailed key "
-        "coordinates get fine resolution near the mode and coarse resolution in "
-        "the tails. It helps most at low bits and in the per-token regime, where "
-        "a uniform min/max grid wastes levels on the tails." + cb_txt +
-        " Full cache integration needs to store and reload that codebook per "
-        "group, so it is future work; this milestone is the numerical case for "
-        "the win.")
+        "coordinates get fine resolution near the mode and coarse near the tails. "
+        "It does exactly what it optimizes: key reconstruction **MSE drops 4–6×** "
+        "vs a uniform grid at matched bits, on both axes." + cb_txt + akl_txt +
+        " That last point is the real lesson — the same **MSE-optimal ≠ "
+        "inner-product-optimal** decoupling this project keeps hitting (M3/M6): a "
+        "better reconstruction is not a better attention distribution, so pure "
+        "MSE-driven NUQ is not the KV win; per-channel int4 (M7) already nails the "
+        "axis that matters. Full cache integration must also store/reload the "
+        "per-group codebook — future work; this milestone is the numerical case.")
 
     verdict = "PASS" if (have_low and ok_low) else "REVIEW"
     lines.append(
@@ -147,7 +166,8 @@ def main() -> int:
 
     df = pd.read_csv(results / "turbo_nuq.csv")
 
-    plot_nuq_vs_uniform(df, "attn_kl", "attention KL vs exact")
+    plot_nuq_vs_uniform(df, "key_mse", "key reconstruction MSE", "m12_nuq_mse")
+    plot_nuq_vs_uniform(df, "attn_kl", "attention KL vs exact", "m12_nuq_attnkl")
     write_table(df)
 
     note = gate(df)

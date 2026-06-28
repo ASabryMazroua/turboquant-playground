@@ -1,0 +1,7 @@
+ctx,rotation,residual_length,sink_length,key_quant,rope_mode,bf16_layers,key_outliers,value_group_size,corpus,eval_tokens,tf_kl,tf_kl_median,tf_kl_p95,tf_argmax_match,n_nonfinite,ppl_bf16,ppl_turbo,ppl_ratio,decode_ms_bf16,decode_ms_turbo,peak_mb_bf16,peak_mb_turbo
+4096,none,128,0,per_token,post,0,0,0,wikitext,256,2.830672,2.295273,6.409181,0.3047,0,20.2149,315.1568,15.5903,23.729,51.039,1149.4,1115.9
+4096,none,128,0,per_token,post,0,8,0,wikitext,256,0.640128,0.38668,2.648584,0.6328,0,20.2149,40.9195,2.0242,23.729,57.846,1149.4,1121.8
+8192,none,128,0,per_token,post,0,0,0,wikitext,256,3.880151,3.327853,9.645042,0.2695,0,4.2745,202.0224,47.2619,24.018,51.424,1341.0,1272.5
+8192,none,128,0,per_token,post,0,8,0,wikitext,256,0.623433,0.348511,2.499185,0.6836,0,4.2745,8.5582,2.0021,24.018,57.971,1341.0,1284.3
+16384,none,128,0,per_token,post,0,0,0,wikitext,256,4.135786,3.697474,9.826839,0.1953,0,9.5423,531.6385,55.7141,23.958,51.646,1723.1,1586.2
+16384,none,128,0,per_token,post,0,8,0,wikitext,256,0.927888,0.623907,3.19416,0.6133,0,9.5423,21.6256,2.2663,23.958,58.243,1723.1,1610.0

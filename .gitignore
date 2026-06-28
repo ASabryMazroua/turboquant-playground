@@ -34,3 +34,5 @@ results/_*
 
 # Local-only AML job specs that carry real subscription/resource IDs (never commit)
 *.local.yml
+# Local-only scratch (submitted job-name lists, poll progress)
+*.local.txt

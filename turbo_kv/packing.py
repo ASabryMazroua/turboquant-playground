@@ -175,6 +175,8 @@ def dequantize_int4_per_token_outliers(codes, scale, lo, out_idx, out_val):
     Dequant the dense per-token grid, then ``scatter_`` the fp16 outlier values
     back into their ``out_idx`` positions along the last dim (exact at outliers).
     """
+    import torch
+
     deq = dequantize_int4_per_token(codes.to(scale.dtype), scale, lo).to(torch.float32)
     if out_idx.numel() == 0:
         return deq
