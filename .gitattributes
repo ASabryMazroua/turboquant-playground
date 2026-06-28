@@ -1,0 +1,9 @@
+# Normalize line endings: treat these as text with LF in the repo.
+* text=auto eol=lf
+
+# Binary assets — never normalize.
+*.png binary
+*.svg text eol=lf
+*.pickle binary
+*.nsys-rep binary
+*.ncu-rep binary

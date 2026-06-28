@@ -1,0 +1,31 @@
+...............F........................................................ [ 92%]
+......                                                                   [100%]
+=================================== FAILURES ===================================
+____________________ test_prod_reduces_ip_bias_vs_mse_only _____________________
+
+    def test_prod_reduces_ip_bias_vs_mse_only():
+        # Keys with a heavy channel outlier are the per-token-quant pain point. After
+        # an RHT rotation, the (b-1)-bit recon + 1-bit QJL residual should have
+        # smaller inner-product BIAS than the b-bit MSE-only reconstruction.
+        torch.manual_seed(0)
+        d, n = 64, 512
+        K = torch.randn(n, d, dtype=torch.float64)
+        K[:, 0] *= 15.0  # outlier channel
+        qq = torch.randn(96, d, dtype=torch.float64)
+        rot = R.make_rotation("rht", d, seed=0, dtype=torch.float64)
+        Rk, Rq = rot.rotate(K), rot.rotate(qq)
+        exact = Rq @ Rk.t()
+    
+        sk = QJLSketch(d, m=d, seed=0)
+        bits = 3.0
+        mse = logits_mse(Rq, Rk, bits, axis="token")
+        prod = logits_prod(Rq, Rk, bits, sk, axis="token")
+        bias_mse = (mse - exact).mean().abs()
+        bias_prod = (prod - exact).mean().abs()
+>       assert bias_prod < bias_mse
+E       assert tensor(0.0375, dtype=torch.float64) < tensor(0.0110, dtype=torch.float64)
+
+tests/test_qjl.py:66: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_qjl.py::test_prod_reduces_ip_bias_vs_mse_only - assert tens...
+1 failed, 77 passed in 10.65s

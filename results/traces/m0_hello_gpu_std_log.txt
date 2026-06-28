@@ -1,0 +1,61 @@
+{
+  "python": "3.10.15",
+  "platform": "Linux-6.8.0-1046-azure-x86_64-with-glibc2.31",
+  "torch": "2.2.2",
+  "cuda_available": true,
+  "device_count": 1,
+  "device_name": "NVIDIA A100-SXM4-80GB",
+  "capability": "8.0",
+  "total_mem_gb": 79.2,
+  "bf16_supported": true,
+  "cuda_runtime": "12.1",
+  "triton": "2.2.0",
+  "nsys": null,
+  "ncu": "/usr/local/cuda/bin/ncu",
+  "bf16_matmul_ms": 1.8461
+}
+
+----- nvidia-smi -----
+Thu Jun 25 13:55:33 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.126.16             Driver Version: 580.126.16     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-SXM4-80GB          On  |   0000000B:00:00.0 Off |                    0 |
+| N/A   32C    P0             66W /  400W |       4MiB /  81920MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA A100-SXM4-80GB          On  |   0000000C:00:00.0 Off |                    0 |
+| N/A   31C    P0             64W /  400W |       0MiB /  81920MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA A100-SXM4-80GB          On  |   0000000D:00:00.0 Off |                    0 |
+| N/A   31C    P0             64W /  400W |       0MiB /  81920MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA A100-SXM4-80GB          On  |   0000000E:00:00.0 Off |                    0 |
+| N/A   31C    P0             66W /  400W |       0MiB /  81920MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+
+----- M0 gates -----
+  CUDA available : True
+  A100 detected  : True  (NVIDIA A100-SXM4-80GB)
+  80GB memory    : True  (79.2 GB)
+  Triton import  : True  (2.2.0)
+  nsys present   : False
+  ncu present    : True
+
+RESULT: PASS (hard gates)

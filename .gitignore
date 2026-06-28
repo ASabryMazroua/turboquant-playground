@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Azure / AML
+.azureml/
+
+# Heavy profiler traces and model weights (keep CSVs, plots, tables)
+results/traces/*.nsys-rep
+results/traces/*.ncu-rep
+results/traces/*.sqlite
+results/traces/*.qdrep
+results/traces/*.json
+results/traces/*.pickle
+models/
+*.safetensors
+*.bin
+*.pt
+
+# Blob-download scratch (artifacts are downloaded here then copied into results/)
+results/_*

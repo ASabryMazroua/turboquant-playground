@@ -1,0 +1,17 @@
+.....F..........................................................         [100%]
+=================================== FAILURES ===================================
+______________________ test_packed_is_half_byte_per_value ______________________
+
+    def test_packed_is_half_byte_per_value():
+        codes = torch.randint(0, 16, (4, 64), dtype=torch.uint8)
+        packed = P.pack_int4(codes)
+        # 64 codes → 32 bytes → exactly 0.5 bytes/value.
+>       assert packed.numel() == 32
+E       assert 128 == 32
+E        +  where 128 = <built-in method numel of Tensor object at 0x7a286671ca40>()
+E        +    where <built-in method numel of Tensor object at 0x7a286671ca40> = tensor([[ 91, 175, 172, 194, 128,  91, 246,  57,   4,  25, 156, 255, 139, 148,\n          21, 110, 102, 233, 222, 105, ...230, 117, 250, 225, 201,  71, 240, 189,   3, 145, 234, 172, 155, 219,\n         135,  51, 132, 250]], dtype=torch.uint8).numel
+
+tests/test_cache.py:27: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_cache.py::test_packed_is_half_byte_per_value - assert 128 =...
+1 failed, 63 passed in 7.90s

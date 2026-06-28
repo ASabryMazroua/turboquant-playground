@@ -1,0 +1,5 @@
+bits,bytes_per_val,theoretical_mb,reduction_vs_bf16
+16,2.0,48.0,1.0
+4,0.5,12.0,4.0
+3,0.375,9.0,5.3333
+2.5,0.3125,7.5,6.4

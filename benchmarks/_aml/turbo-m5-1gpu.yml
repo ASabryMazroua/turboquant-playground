@@ -1,0 +1,42 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: turbo-kv-lab
+display_name: turbo-m5-int4-kernels-1gpu
+
+compute: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.MachineLearningServices/virtualclusters/<VIRTUAL_CLUSTER>
+
+environment:
+  image: mcr.microsoft.com/aifx/acpt/stable-ubuntu2004-cu121-py310-torch22x:biweekly.202410.1
+
+code: ../..
+
+# M5 fused int4 Triton kernels. Gate = reference-equality tests (kernel vs
+# dequant+matmul within 1e-3) MUST pass before the microbench runs (&&). The
+# microbench compares fused int4 logits/values kernels against the dequant
+# reference on correctness, latency (triton.testing.do_bench), peak memory (no
+# full dequant materialized), and bandwidth, plus an honest fused-vs-dequant
+# decode-step comparison. Triton 2.2.0 ships in the ACPT image; root-indep pip.
+command: >-
+  printf 'torch==2.2.2\ntorchvision==0.17.2\ntorchaudio==2.2.2\ntriton==2.2.0\n' > /tmp/constraints.txt &&
+  (pip install -q -c /tmp/constraints.txt pandas pytest || pip install -q --user -c /tmp/constraints.txt pandas pytest) &&
+  python -c "import torch, triton; print('torch', torch.__version__, 'triton', triton.__version__, torch.cuda.get_device_name(0))" &&
+  python -m pytest tests/test_kernels.py tests/test_cache.py tests/test_qjl.py -q 2>&1 | tee outputs/pytest_m5.txt &&
+  python -u benchmarks/benchmark_attention_micro.py --nq 1,64 --nk 1024,4096,8192,16384 --head-dim 64 --out-dir outputs
+
+resources:
+  instance_count: 1
+  instance_type: Singularity.ND48am_A100_v4   # 4x A100 80GB node; 1 GPU used via CUDA_VISIBLE_DEVICES
+  properties:
+    AISuperComputer:
+      interactive: false
+      virtualClusterArmId: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.MachineLearningServices/virtualclusters/<VIRTUAL_CLUSTER>
+      slaTier: Standard
+      priority: Medium
+
+environment_variables:
+  _AZUREML_SINGULARITY_JOB_UAI: /subscriptions/<SUBSCRIPTION_ID>/resourcegroups/<RESOURCE_GROUP>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<USER_ASSIGNED_IDENTITY>
+  AZUREML_COMPUTE_USE_COMMON_RUNTIME: "true"
+  SINGULARITY_CUSTOM_IMAGE: "true"
+  SINGULARITY_CUSTOM_IMAGE_COMMANDS: "USER root"
+  CUDA_VISIBLE_DEVICES: "0"
+  HF_HUB_DISABLE_TELEMETRY: "1"

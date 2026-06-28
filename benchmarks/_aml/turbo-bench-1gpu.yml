@@ -1,0 +1,48 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: turbo-kv-lab
+display_name: turbo-bench-m1-1gpu
+
+compute: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.MachineLearningServices/virtualclusters/<VIRTUAL_CLUSTER>
+
+# CUDA ACPT base image (A100 == CUDA). transformers/quanto/pynvml are pip-installed
+# at job start (node has outbound for the M0-verified image pull path).
+environment:
+  image: mcr.microsoft.com/aifx/acpt/stable-ubuntu2004-cu121-py310-torch22x:biweekly.202410.1
+
+# Upload the whole repo (minus .amlignore) so turbo_kv + benchmarks import cleanly.
+code: ../..
+
+# Each python invocation stays on ONE folded line (PLAN §5 YAML gotcha).
+# torch is pinned via a constraints file so transformers/quanto cannot upgrade the
+# pre-installed cu121 build. transformers 4.45.2's QuantoQuantizedCache imports the
+# *legacy* `quanto` package (optimum-quanto support landed in 4.46+), so we install
+# `quanto==0.2.0` (torch>=2.2 compatible) under the same constraints; best-effort,
+# falling back to a first-class int4 FAIL row if unavailable.
+# Generate sweep tops out at 30720 ctx so ctx+decode stays inside the 32768 rotary
+# range (kv-bytes allocation test still probes the full 32768).
+command: >-
+  printf 'torch==2.2.2\ntorchvision==0.17.2\ntorchaudio==2.2.2\n' > /tmp/constraints.txt &&
+  pip install -q -c /tmp/constraints.txt "transformers==4.45.2" "accelerate==0.34.2" pandas "nvidia-ml-py>=12.0" &&
+  (pip install -q -c /tmp/constraints.txt "quanto==0.2.0" && python -c "import quanto, importlib.metadata as m; print('quanto', m.version('quanto'))" || echo "[warn] quanto unavailable; int4 baseline -> FAIL row") &&
+  python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no-cuda')" &&
+  python -u benchmarks/benchmark_cache_memory.py --model-path Qwen/Qwen2.5-0.5B-Instruct --contexts 2048,8192,16384,32768 --batches 1,4 --out outputs/kv_bytes.csv &&
+  python -u benchmarks/benchmark_generate.py --model-path Qwen/Qwen2.5-0.5B-Instruct --contexts 2048,8192,16384,30720 --batches 1,4 --caches dynamic_bf16,static_bf16,quantized_int4 --decode-tokens 64 --out outputs/baseline.csv --nvml --profile --mem-snapshot
+
+resources:
+  instance_count: 1
+  instance_type: Singularity.ND48am_A100_v4   # 4x A100 80GB node; 1 GPU used via CUDA_VISIBLE_DEVICES
+  properties:
+    AISuperComputer:
+      interactive: false
+      virtualClusterArmId: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.MachineLearningServices/virtualclusters/<VIRTUAL_CLUSTER>
+      slaTier: Standard
+      priority: Medium
+
+environment_variables:
+  _AZUREML_SINGULARITY_JOB_UAI: /subscriptions/<SUBSCRIPTION_ID>/resourcegroups/<RESOURCE_GROUP>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<USER_ASSIGNED_IDENTITY>
+  AZUREML_COMPUTE_USE_COMMON_RUNTIME: "true"
+  SINGULARITY_CUSTOM_IMAGE: "true"
+  SINGULARITY_CUSTOM_IMAGE_COMMANDS: "USER root"
+  CUDA_VISIBLE_DEVICES: "0"
+  HF_HUB_DISABLE_TELEMETRY: "1"

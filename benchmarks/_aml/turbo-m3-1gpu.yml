@@ -1,0 +1,41 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+experiment_name: turbo-kv-lab
+display_name: turbo-m3-turbokvcache-1gpu
+
+compute: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.MachineLearningServices/virtualclusters/<VIRTUAL_CLUSTER>
+
+environment:
+  image: mcr.microsoft.com/aifx/acpt/stable-ubuntu2004-cu121-py310-torch22x:biweekly.202410.1
+
+code: ../..
+
+# torch pinned via constraints so transformers/pytest installs cannot upgrade the
+# cu121 build. M3 gate = unit tests (int4 pack/unpack roundtrip, per-token quant,
+# cache compression + ~4x memory) MUST pass before the cache benchmark runs (&&).
+# Then build TurboKVCache on a real 4k Qwen context: measure stored bytes (≈4x
+# smaller) and teacher-forced coherence vs BF16 across residual_length × rotation.
+command: >-
+  printf 'torch==2.2.2\ntorchvision==0.17.2\ntorchaudio==2.2.2\n' > /tmp/constraints.txt &&
+  pip install -q -c /tmp/constraints.txt "transformers==4.45.2" "accelerate==0.34.2" pandas pytest &&
+  python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no-cuda')" &&
+  python -m pytest tests/ -q 2>&1 | tee outputs/pytest_m3.txt &&
+  python -u benchmarks/benchmark_turbo_cache.py --model-path Qwen/Qwen2.5-0.5B-Instruct --ctx 4096 --steps 32 --residual-lengths 32,64,128,256 --rotations dense,rht,none --out-dir outputs
+
+resources:
+  instance_count: 1
+  instance_type: Singularity.ND48am_A100_v4   # 4x A100 80GB node; 1 GPU used via CUDA_VISIBLE_DEVICES
+  properties:
+    AISuperComputer:
+      interactive: false
+      virtualClusterArmId: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.MachineLearningServices/virtualclusters/<VIRTUAL_CLUSTER>
+      slaTier: Standard
+      priority: Medium
+
+environment_variables:
+  _AZUREML_SINGULARITY_JOB_UAI: /subscriptions/<SUBSCRIPTION_ID>/resourcegroups/<RESOURCE_GROUP>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<USER_ASSIGNED_IDENTITY>
+  AZUREML_COMPUTE_USE_COMMON_RUNTIME: "true"
+  SINGULARITY_CUSTOM_IMAGE: "true"
+  SINGULARITY_CUSTOM_IMAGE_COMMANDS: "USER root"
+  CUDA_VISIBLE_DEVICES: "0"
+  HF_HUB_DISABLE_TELEMETRY: "1"

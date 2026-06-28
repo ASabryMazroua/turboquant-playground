@@ -1,0 +1,13 @@
+# Keep AML code-upload snapshots small: only ship source, not results/weights/caches.
+.git/
+.venv/
+results/
+models/
+weights/
+notebooks/
+**/__pycache__/
+**/*.pyc
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+*.pickle

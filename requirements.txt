@@ -1,0 +1,12 @@
+# Core dependencies for the CPU-side reproduction:
+#   - rebuild every plot/table from the committed results/*.csv (pandas, matplotlib, numpy)
+#   - run the pure-math unit tests (these need torch; the CPU build is sufficient)
+#
+# The GPU experiments additionally need: transformers, accelerate, datasets, triton
+# (see section "Reproduce it / B" in the README). Those are intentionally NOT pinned
+# here so a plain `pip install -r requirements.txt` stays light.
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+pytest>=7.0
+torch>=2.2          # CPU build is fine for the pure-math tests; GPU build for the benchmarks
