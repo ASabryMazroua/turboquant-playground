@@ -54,7 +54,21 @@ def _turbo_sdpa_forward(
         cos, sin = self.rotary_emb(v, position_ids)
     else:
         cos, sin = position_embeddings
-    q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+    pre_rope = getattr(self, "_turbo_pre_rope", False)
+    if pre_rope:
+        # KVQuant pre-RoPE keys: apply RoPE to the QUERY only and keep the key in
+        # its RAW pre-rotary basis. The cache stores/quantizes the pre-RoPE key
+        # and re-applies RoPE to the reconstructed key at attention time. cos/sin
+        # are unsqueezed to [B, 1, T, D] exactly like ``apply_rotary_pos_emb``.
+        from transformers.models.qwen2.modeling_qwen2 import rotate_half
+
+        cos_q = cos.unsqueeze(1)
+        sin_q = sin.unsqueeze(1)
+        q = (q * cos_q) + (rotate_half(q) * sin_q)
+        # k is left as the raw pre-RoPE key (NOT rotated here).
+    else:
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
     # --- TurboQuant rotation (rotate-query identity) on head_dim ---
     rot = self._turbo_rot
@@ -69,6 +83,8 @@ def _turbo_sdpa_forward(
 
     if past_key_value is not None:
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+        if pre_rope:
+            cache_kwargs["rope_inv_freq"] = getattr(self, "_turbo_inv_freq", None)
         k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
 
     k = repeat_kv(k, self.num_key_value_groups)
@@ -96,12 +112,20 @@ def _turbo_sdpa_forward(
     return attn_out, None, past_key_value
 
 
-def patch_qwen2_attention(model, *, rotation: str = "rht", seed: int = 0):
+def patch_qwen2_attention(model, *, rotation: str = "rht", seed: int = 0, pre_rope: bool = False):
     """Patch every ``self_attn`` of a Qwen2 model with the rotate-query int4 forward.
 
     A single orthogonal rotation ``R`` (shared across layers and heads) is built on
     ``head_dim`` and attached to each attention module. Returns ``model`` (mutated).
     Call :func:`unpatch_qwen2_attention` to restore.
+
+    ``pre_rope=True`` enables KVQuant pre-RoPE key quantization: keys are passed to
+    the cache in their RAW pre-rotary basis and RoPE is re-applied to the
+    reconstructed keys (see :class:`turbo_kv.cache.TurboKVCache`). The rotary base
+    frequencies ``inv_freq`` are captured from each attention module's rotary
+    embedding (transformers <4.45) or the model-level rotary embedding
+    (transformers >=4.45, e.g. 4.45.2) and attached as ``attn._turbo_inv_freq``.
+    For pre_rope we expect ``rotation="none"`` (R is identity).
     """
     import torch
 
@@ -109,15 +133,34 @@ def patch_qwen2_attention(model, *, rotation: str = "rht", seed: int = 0):
     dev = next(model.parameters()).device
     rot = R.make_rotation(rotation, head_dim, seed=seed, device=dev, dtype=torch.float32)
 
+    model_inv_freq = None
+    if pre_rope:
+        # transformers >=4.45 moves the rotary embedding to the model level.
+        try:
+            model_inv_freq = model.model.rotary_emb.inv_freq
+        except Exception:
+            model_inv_freq = None
+
     for layer in model.model.layers:
         attn = layer.self_attn
         if not hasattr(attn, "_turbo_orig_forward"):
             attn._turbo_orig_forward = attn.forward
         attn._turbo_rot = rot
+        attn._turbo_pre_rope = bool(pre_rope)
+        if pre_rope:
+            inv_freq = None
+            try:
+                inv_freq = attn.rotary_emb.inv_freq
+            except Exception:
+                inv_freq = None
+            if inv_freq is None:
+                inv_freq = model_inv_freq
+            attn._turbo_inv_freq = inv_freq
         attn.forward = types.MethodType(_turbo_sdpa_forward, attn)
 
     model._turbo_patched = True
     model._turbo_rotation = rotation
+    model._turbo_pre_rope = bool(pre_rope)
     return model
 
 
@@ -130,5 +173,9 @@ def unpatch_qwen2_attention(model):
             del attn._turbo_orig_forward
         if hasattr(attn, "_turbo_rot"):
             del attn._turbo_rot
+        if hasattr(attn, "_turbo_pre_rope"):
+            del attn._turbo_pre_rope
+        if hasattr(attn, "_turbo_inv_freq"):
+            del attn._turbo_inv_freq
     model._turbo_patched = False
     return model

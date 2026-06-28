@@ -46,6 +46,7 @@ class TurboKVCache(_try_cache_base()):
         sink_length: int = 0,
         key_quant: str = "per_token",
         key_group_size: int = 32,
+        pre_rope: bool = False,
     ) -> None:
         super().__init__()
         if bits != 4:
@@ -64,6 +65,13 @@ class TurboKVCache(_try_cache_base()):
         self.key_quant = key_quant
         self.key_group_size = int(key_group_size)
         self._key_axis = "channel" if key_quant == "per_channel" else "token"
+        # Pre-RoPE key quantization (KVQuant fix): keys are stored/quantized in
+        # their RAW pre-rotary basis (RoPE injects position-dependent variation
+        # that hurts quantization) and RoPE is re-applied to the reconstructed
+        # keys at attention time using per-token positions + the rotary base
+        # frequencies. Values are unaffected by RoPE.
+        self.pre_rope = bool(pre_rope)
+        self._rope_inv_freq: Optional[Any] = None  # [D/2] rotary base freqs
 
         self._rot: Optional[R.Rotation] = None  # built lazily on first update
         # Per-layer compressed store (packed codes + per-token scale/zero).
@@ -77,6 +85,10 @@ class TurboKVCache(_try_cache_base()):
         # quantize; StreamingLLM/KIVI keep them in full precision).
         self._sK: List[Optional[Any]] = []
         self._sV: List[Optional[Any]] = []
+        # Per-layer int32 positions buffer (pre_rope only): absolute token
+        # position of each stored token, in arrival order. Cheap (T int32 values)
+        # and preserves the memory win; used to re-apply RoPE on reconstruction.
+        self._pos: List[Optional[Any]] = []
         self._seen_tokens = 0  # total tokens seen by layer 0
 
     # ------------------------------------------------------------------ #
@@ -90,6 +102,38 @@ class TurboKVCache(_try_cache_base()):
             self._wV.append(None)
             self._sK.append(None)
             self._sV.append(None)
+            self._pos.append(None)
+
+    @staticmethod
+    def _rotate_half(x):
+        """HuggingFace ``rotate_half``: split last dim in halves, rotate."""
+        import torch
+
+        d = x.shape[-1]
+        x1 = x[..., : d // 2]
+        x2 = x[..., d // 2:]
+        return torch.cat([-x2, x1], dim=-1)
+
+    def _apply_rope(self, k, positions, out_dtype):
+        """Apply RoPE to a full reconstructed pre-RoPE key ``[B,H,T,D]``.
+
+        cos/sin are built EXACTLY like HuggingFace from the stored positions and
+        the rotary base frequencies ``inv_freq`` ``[D/2]``.
+        """
+        import torch
+
+        inv_freq = self._rope_inv_freq
+        assert inv_freq is not None, (
+            "pre_rope=True requires rope_inv_freq in cache_kwargs on first update")
+        pos = positions.to(device=k.device, dtype=torch.float32)
+        inv = inv_freq.to(device=k.device, dtype=torch.float32)
+        freqs = pos[:, None] * inv[None, :]            # [T, D/2]
+        emb = torch.cat([freqs, freqs], dim=-1)        # [T, D]
+        cos = emb.cos()[None, None, :, :]              # [1, 1, T, D]
+        sin = emb.sin()[None, None, :, :]
+        kf = k.to(torch.float32)
+        k_post = kf * cos + self._rotate_half(kf) * sin
+        return k_post.to(out_dtype)
 
     def _ensure_rotation(self, device, dtype) -> None:
         if self._rot is None:
@@ -186,6 +230,23 @@ class TurboKVCache(_try_cache_base()):
         if layer_idx == 0:
             self._seen_tokens += key_states.shape[2]
 
+        # pre-RoPE bookkeeping: track per-token positions (for re-applying RoPE
+        # on reconstruction) and the rotary base frequencies (captured once).
+        if self.pre_rope:
+            ck = cache_kwargs or {}
+            inv = ck.get("rope_inv_freq")
+            if inv is not None and self._rope_inv_freq is None:
+                self._rope_inv_freq = inv.detach()
+            existing = 0 if self._pos[layer_idx] is None else self._pos[layer_idx].shape[0]
+            T_new = key_states.shape[2]
+            cp = ck.get("cache_position")
+            if cp is None:
+                cp = torch.arange(existing, existing + T_new, device=key_states.device)
+            cp = cp.reshape(-1).to(device=key_states.device, dtype=torch.int32)
+            self._pos[layer_idx] = (
+                cp if self._pos[layer_idx] is None
+                else torch.cat([self._pos[layer_idx], cp], dim=0))
+
         # 1) append new tokens to the BF16 window.
         wK = key_states if self._wK[layer_idx] is None else torch.cat([self._wK[layer_idx], key_states], dim=2)
         wV = value_states if self._wV[layer_idx] is None else torch.cat([self._wV[layer_idx], value_states], dim=2)
@@ -231,9 +292,19 @@ class TurboKVCache(_try_cache_base()):
             parts_V.append(self._decompress(self._cV[layer_idx], out_dtype))
         parts_K.append(wK)
         parts_V.append(wV)
-        if len(parts_K) == 1:
-            return parts_K[0], parts_V[0]
-        return torch.cat(parts_K, dim=2), torch.cat(parts_V, dim=2)
+        full_K = parts_K[0] if len(parts_K) == 1 else torch.cat(parts_K, dim=2)
+        full_V = parts_V[0] if len(parts_V) == 1 else torch.cat(parts_V, dim=2)
+        if self.pre_rope:
+            # Re-apply RoPE to the reconstructed pre-RoPE keys. The stored
+            # positions buffer is appended in arrival order, which is exactly the
+            # reconstruction order (sink → history → window), so it aligns 1:1
+            # with the concatenated keys. Values are NOT rotated.
+            positions = self._pos[layer_idx]
+            assert positions is not None and positions.shape[0] == full_K.shape[2], (
+                f"pre_rope positions ({0 if positions is None else positions.shape[0]}) "
+                f"must align with reconstructed key length ({full_K.shape[2]})")
+            full_K = self._apply_rope(full_K, positions, out_dtype)
+        return full_K, full_V
 
     def get_seq_length(self, layer_idx: int = 0) -> int:
         if layer_idx >= len(self._wK) or self._wK[layer_idx] is None:
@@ -276,8 +347,13 @@ class TurboKVCache(_try_cache_base()):
     # memory accounting
     # ------------------------------------------------------------------ #
     def memory_bytes(self) -> dict:
-        """Resident storage bytes: packed codes + scale/zero + BF16 window."""
-        packed = scale_zero = window = 0
+        """Resident storage bytes: packed codes + scale/zero + BF16 window.
+
+        When ``pre_rope`` is on, the per-layer int32 positions buffer is also
+        counted (``position_bytes``); it is a handful of bytes per token and does
+        not change the ~4x memory win.
+        """
+        packed = scale_zero = window = position = 0
         for layer_idx in range(len(self._wK)):
             for store in (self._cK[layer_idx], self._cV[layer_idx]):
                 if store is not None:
@@ -288,9 +364,13 @@ class TurboKVCache(_try_cache_base()):
                       self._sK[layer_idx], self._sV[layer_idx]):
                 if w is not None:
                     window += w.numel() * w.element_size()
+            p = self._pos[layer_idx] if layer_idx < len(self._pos) else None
+            if p is not None:
+                position += p.numel() * p.element_size()
         return {
             "packed_bytes": packed,
             "scale_zero_bytes": scale_zero,
             "window_bytes": window,
-            "total_bytes": packed + scale_zero + window,
+            "position_bytes": position,
+            "total_bytes": packed + scale_zero + window + position,
         }

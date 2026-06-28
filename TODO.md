@@ -99,10 +99,35 @@ Legend: ⬜ not started · 🟡 in progress · 🔵 awaiting Codex review · ✅
 - [x] Tests: `test_per_channel_keys_beat_per_token_on_channel_outlier`, `test_per_channel_decode_token_by_token` (pytest 19/19)
 - [x] **Gate PASS:** per-channel int4 KV ppl_ratio **1.017/1.034/1.007×** at ctx 4k/8k/16k on WikiText (was 15.6/47.3/55.7×) — **15–55× better, near-lossless**, even post-RoPE
 - [x] Plot `m7_per_channel_fix` + `m7_per_channel` table + `m7_gate.md`; run `epic_pear_1kpc0vwhp8`; README Finding 5 (redemption) + thesis updated
-- [ ] Next (optional): pre-RoPE key quant (KVQuant) + real QJL key sketch (m=256) — then the **retrieval** pivot (TurboQuant vs Product Quantization on ANN, in the paper)
+- [x] Next: deepen with the field's full recipe → **M8–M15 field-recipe fixes** (below)
 
 ## Final — Portfolio README  ✅ (live)
 - [x] Compelling undergrad-level story with 5 findings incl. the redemption; thesis written
 - [x] Embedded plots (`m2_axis_contrast`, `m4_corpus_comparison`, `m6_ip_bias_hist`, `m6_pareto`, `m5_decode`, `m7_per_channel_fix`)
 - [x] Scrubbed secrets, MIT LICENSE, requirements.txt, reproducible (`report_*.py` rebuild plots on CPU); pushed to github.com/ASabryMazroua/turboquant-playground
 - [ ] Optional: fill PLAN §11 master table; add retrieval chapter
+
+---
+
+## Field-recipe fixes (M8–M15) — closing the gap to KIVI / KVQuant / QJL
+
+M7 made int4 KV near-lossless with per-channel keys. These eight fixes apply the
+rest of the field's recipe (the design choices we originally got wrong). Code is
+implemented + `py_compile`-clean locally; **real numbers come from a batched A100
+validation run** (local env has no torch/GPU). Legend: 🧩 code-complete (numbers
+pending) · ✅ validated on A100.
+
+### M8 — Pre-RoPE key quantization (KVQuant fix)  🧩
+- [x] `TurboKVCache(pre_rope=True)`: store/quantize RAW pre-RoPE keys + a tiny int32 positions buffer; re-apply RoPE (HF-exact, from `inv_freq`) to reconstructed keys; values untouched; `memory_bytes` adds `position_bytes`
+- [x] `qwen_patch.py`: `pre_rope` flag → RoPE on **query only**, pass raw key + `rope_inv_freq`+`cache_position` to the cache; `inv_freq` located for transformers 4.45.2 (model-level rotary, per-attn fallback)
+- [x] `benchmark_qwen_turbo.py` `--rope-modes post,pre` (default `post`, no regression); `rope_mode` CSV column; re-patch per mode
+- [x] `tests/test_pre_rope.py` (RoPE reconstruction vs HF reference, short-context exactness, eviction position alignment, pre_rope-off no-op); `report_m8.py` (`m8_pre_rope` plot/table + gate ≤ post-RoPE KL); `benchmarks/_aml/turbo-m8-1gpu.yml` (placeholders)
+- [ ] **Gate (pending A100):** pre-RoPE tf_kl ≤ post-RoPE tf_kl at every context on WikiText (per-channel, rotation=none)
+
+### M9 — Early-layer bit allocation (QJL)  ⬜
+### M10 — Dense-and-sparse outliers (KVQuant + QJL)  ⬜
+### M11 — QJL done right: large-m key sign-sketch (QJL)  ⬜
+### M12 — Non-uniform quantization NUQ (KVQuant)  ⬜
+### M13 — Group-wise values + tuned residual buffer (KIVI/QJL)  ⬜
+### M14 — Attention-sink + per-channel combo (StreamingLLM/KVQuant)  ⬜
+### M15 — Fused int4 tensor-core kernel (best-effort Triton MMA)  ⬜
