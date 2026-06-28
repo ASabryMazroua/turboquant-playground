@@ -49,6 +49,7 @@ class TurboKVCache(_try_cache_base()):
         pre_rope: bool = False,
         bf16_layers: int = 0,
         key_outliers: int = 0,
+        value_group_size: int = 0,
     ) -> None:
         super().__init__()
         if bits != 4:
@@ -88,6 +89,18 @@ class TurboKVCache(_try_cache_base()):
         # already isolates channel outliers with its own scale) and for values.
         # ``key_outliers=0`` is byte-for-byte identical to the all-dense cache.
         self.key_outliers = int(key_outliers)
+        # Group-wise VALUE quantization (KIVI/AWQ): split each value head_dim into
+        # groups of ``value_group_size`` consecutive coords and give each group its
+        # own int4 scale/zero, instead of one scale per whole token. Finer
+        # resolution when intra-head magnitude varies. VALUES only — keys keep
+        # their per-channel / per-token-outlier schemes. ``value_group_size=0``
+        # means whole-head (current behavior, byte-for-byte identical); ``>0`` must
+        # divide ``head_dim``.
+        self.value_group_size = int(value_group_size)
+        if self.value_group_size > 0 and self.head_dim % self.value_group_size != 0:
+            raise ValueError(
+                f"value_group_size ({self.value_group_size}) must divide "
+                f"head_dim ({self.head_dim})")
 
         self._rot: Optional[R.Rotation] = None  # built lazily on first update
         # Per-layer compressed store (packed codes + per-token scale/zero).
@@ -161,13 +174,17 @@ class TurboKVCache(_try_cache_base()):
                 self.rotation_kind, self.head_dim, seed=self.seed, device=device, dtype=dtype
             )
 
-    def _compress(self, x, axis: str = "token", n_outliers: int = 0):
+    def _compress(self, x, axis: str = "token", n_outliers: int = 0, group_size: int = 0):
         """[B,H,T,D] BF16 → packed int4 dict (rotate → quant → pack).
 
         ``axis='token'`` (one scale per token) or ``'channel'`` (one scale per
         coordinate over the whole evicted block — the KIVI key scheme).
         ``n_outliers>0`` (token axis only, keys only) keeps the top-N per-token
         coordinates in fp16 (dense-and-sparse, KVQuant/QJL) and quantizes the rest.
+        ``group_size>0`` (token axis only, values only) splits each token's
+        head_dim into groups with one int4 scale each (KIVI/AWQ group-wise values).
+        ``n_outliers`` and ``group_size`` are mutually exclusive (keys use one,
+        values use the other).
         """
         import torch
 
@@ -182,6 +199,17 @@ class TurboKVCache(_try_cache_base()):
                 "T": x.shape[2],
                 "D": x.shape[3],
                 "axis": "channel",
+            }
+        if group_size > 0 and n_outliers == 0:
+            codes, scale, lo = P.quantize_int4_per_token_grouped(xr, group_size)
+            return {
+                "packed": P.pack_int4(codes),
+                "scale": scale.to(torch.bfloat16),   # [B,H,T,ng]
+                "lo": lo.to(torch.bfloat16),         # [B,H,T,ng]
+                "vgroup": int(group_size),
+                "T": x.shape[2],
+                "D": x.shape[3],
+                "axis": "token",
             }
         if n_outliers > 0:
             codes, scale, lo, out_idx, out_val = P.quantize_int4_per_token_outliers(
@@ -218,6 +246,10 @@ class TurboKVCache(_try_cache_base()):
             scale = store["scale"].to(torch.float32).repeat_interleave(sizes, dim=2)
             lo = store["lo"].to(torch.float32).repeat_interleave(sizes, dim=2)
             deq = codes * scale + lo
+        elif store.get("vgroup", 0) > 0:
+            deq = P.dequantize_int4_per_token_grouped(
+                codes, store["scale"].to(torch.float32), store["lo"].to(torch.float32),
+                store["vgroup"])
         elif store.get("outliers", 0) > 0:
             deq = P.dequantize_int4_per_token_outliers(
                 codes, store["scale"].to(torch.float32), store["lo"].to(torch.float32),
@@ -243,6 +275,18 @@ class TurboKVCache(_try_cache_base()):
                 "T": dst["T"] + src["T"],
                 "D": dst["D"],
                 "axis": "channel",
+            }
+        if src.get("vgroup", 0) > 0:
+            # grouped values: scale/lo are [B,H,T,ng], so dim=2 (token) concat is
+            # correct just like packed (also token-major).
+            return {
+                "packed": torch.cat([dst["packed"], src["packed"]], dim=2),
+                "scale": torch.cat([dst["scale"], src["scale"]], dim=2),
+                "lo": torch.cat([dst["lo"], src["lo"]], dim=2),
+                "vgroup": src["vgroup"],
+                "T": dst["T"] + src["T"],
+                "D": dst["D"],
+                "axis": "token",
             }
         if src.get("outliers", 0) > 0:
             return {
@@ -333,7 +377,8 @@ class TurboKVCache(_try_cache_base()):
                     self._cK[layer_idx],
                     self._compress(evK, self._key_axis, n_outliers=self.key_outliers))
                 self._cV[layer_idx] = self._append_store(
-                    self._cV[layer_idx], self._compress(evV, "token"))
+                    self._cV[layer_idx],
+                    self._compress(evV, "token", group_size=self.value_group_size))
             wK = wK[:, :, n_evict:, :].contiguous()
             wV = wV[:, :, n_evict:, :].contiguous()
         self._wK[layer_idx] = wK

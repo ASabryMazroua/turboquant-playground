@@ -61,6 +61,56 @@ def dequantize_int4_per_token(codes, scale, lo):
     return codes.to(scale.dtype) * scale + lo
 
 
+def quantize_int4_per_token_grouped(x, group_size: int):
+    """Group-wise per-token affine quant (KIVI/AWQ) of ``x`` ``[..., T, D]``.
+
+    Values currently get ONE int4 scale per token over all ``D`` coords; when a
+    value head's coordinate magnitude varies across the head (some sub-blocks
+    large, others small) that single scale wastes the int4 grid. KIVI quantizes
+    per-token but in **groups** of ``group_size`` consecutive coordinates, one
+    affine scale/zero per group, giving each sub-block its own range.
+
+    ``D`` must be divisible by ``group_size``; ``ng = D // group_size`` groups.
+    The last dim is reshaped to ``[..., T, ng, group_size]``, the affine min/max
+    is taken per group, and codes are reshaped back to ``[..., T, D]`` (uint8).
+
+    Returns ``(codes uint8 [..., T, D], scale, lo)`` where ``scale``/``lo`` have
+    shape ``[..., T, ng]`` (the trailing singleton group dim is squeezed) — one
+    scale and zero per (token, group). ``group_size == D`` reduces numerically to
+    :func:`quantize_int4_per_token` (a single group spanning the whole head).
+    """
+    import torch
+
+    x = x.to(torch.float32)
+    d = x.shape[-1]
+    assert d % group_size == 0, (
+        f"head_dim ({d}) must be divisible by group_size ({group_size})")
+    ng = d // group_size
+    xg = x.reshape(*x.shape[:-1], ng, group_size)            # [..., T, ng, G]
+    lo = xg.amin(dim=-1, keepdim=True)                       # [..., T, ng, 1]
+    hi = xg.amax(dim=-1, keepdim=True)
+    scale = ((hi - lo) / (INT4_LEVELS - 1)).clamp_min(1e-8)
+    codes = torch.clamp(torch.round((xg - lo) / scale), 0, INT4_LEVELS - 1).to(torch.uint8)
+    codes = codes.reshape(*x.shape)                          # [..., T, D]
+    return codes, scale.squeeze(-1), lo.squeeze(-1)          # scale/lo [..., T, ng]
+
+
+def dequantize_int4_per_token_grouped(codes, scale, lo, group_size: int):
+    """Inverse of :func:`quantize_int4_per_token_grouped` → float32.
+
+    ``codes`` is ``[..., T, D]`` and ``scale``/``lo`` are ``[..., T, ng]``. Codes
+    are reshaped to ``[..., T, ng, group_size]`` so the per-group scale/zero
+    broadcast over the trailing group dim, then reshaped back to ``[..., T, D]``.
+    """
+    import torch
+
+    d = codes.shape[-1]
+    ng = d // group_size
+    cg = codes.to(torch.float32).reshape(*codes.shape[:-1], ng, group_size)
+    deq = cg * scale.to(torch.float32)[..., None] + lo.to(torch.float32)[..., None]
+    return deq.reshape(*codes.shape).to(torch.float32)
+
+
 def quantize_int4_per_channel(x):
     """Per-**channel** affine quant of ``x`` ``[..., T, D]`` → ``(codes, scale, lo)``.
 
