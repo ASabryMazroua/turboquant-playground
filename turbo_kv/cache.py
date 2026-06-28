@@ -47,6 +47,7 @@ class TurboKVCache(_try_cache_base()):
         key_quant: str = "per_token",
         key_group_size: int = 32,
         pre_rope: bool = False,
+        bf16_layers: int = 0,
     ) -> None:
         super().__init__()
         if bits != 4:
@@ -72,6 +73,12 @@ class TurboKVCache(_try_cache_base()):
         # frequencies. Values are unaffected by RoPE.
         self.pre_rope = bool(pre_rope)
         self._rope_inv_freq: Optional[Any] = None  # [D/2] rotary base freqs
+        # Per-layer bit allocation (QJL "more bits for early layers"): the first
+        # ``bf16_layers`` layers are the most quantization-sensitive (M2 found
+        # layer 0 a huge inner-product RMSE outlier), so keep their KV entirely in
+        # BF16 (never evict/compress) and int4 the rest. ``bf16_layers=0`` is
+        # byte-for-byte identical to the all-int4 cache.
+        self.bf16_layers = int(bf16_layers)
 
         self._rot: Optional[R.Rotation] = None  # built lazily on first update
         # Per-layer compressed store (packed codes + per-token scale/zero).
@@ -94,6 +101,10 @@ class TurboKVCache(_try_cache_base()):
     # ------------------------------------------------------------------ #
     # helpers
     # ------------------------------------------------------------------ #
+    def _is_bf16_layer(self, layer_idx: int) -> bool:
+        """True if ``layer_idx`` is kept entirely in BF16 (no quantization)."""
+        return layer_idx < self.bf16_layers
+
     def _ensure_layer(self, layer_idx: int) -> None:
         while len(self._wK) <= layer_idx:
             self._cK.append(None)
@@ -255,7 +266,11 @@ class TurboKVCache(_try_cache_base()):
         n_overflow = wK.shape[2] - self.residual_length
         # per-channel keys evict in whole ``key_group_size`` blocks so each block's
         # per-channel scale sees real token statistics, not a single decode token.
-        if self.key_quant == "per_channel" and n_overflow > 0:
+        if self._is_bf16_layer(layer_idx):
+            # BF16 bit-allocation layer: keep ALL tokens in the BF16 window, never
+            # compress, so reconstruction is the exact BF16 history+window.
+            n_evict = 0
+        elif self.key_quant == "per_channel" and n_overflow > 0:
             n_evict = (n_overflow // self.key_group_size) * self.key_group_size
         else:
             n_evict = n_overflow

@@ -320,6 +320,9 @@ def main() -> int:
     ap.add_argument("--rope-modes", default="post",
                     help="comma list of RoPE modes: 'post' (RoPE before quant, current) "
                          "and/or 'pre' (KVQuant pre-RoPE key quant)")
+    ap.add_argument("--bf16-layers", default="0",
+                    help="comma list of INITIAL layer counts kept entirely in BF16 "
+                         "(QJL per-layer bit allocation; 0 = all-int4, no change)")
     ap.add_argument("--corpus", default="synthetic",
                     help="'synthetic' (tiled + held-out eval) or 'wikitext' (real prose)")
     ap.add_argument("--out-dir", default="outputs")
@@ -344,8 +347,10 @@ def main() -> int:
     sink_lengths = [int(s) for s in args.sink_lengths.split(",")]
     key_quants = [k.strip() for k in args.key_quants.split(",")]
     rope_modes = [m.strip() for m in args.rope_modes.split(",")]
+    bf16_layer_counts = [int(x) for x in args.bf16_layers.split(",")]
     print(f"model: layers={nL} kv_heads={nKV} head_dim={D} residual_length={rl} "
-          f"sinks={sink_lengths} key_quants={key_quants} rope_modes={rope_modes}")
+          f"sinks={sink_lengths} key_quants={key_quants} rope_modes={rope_modes} "
+          f"bf16_layers={bf16_layer_counts}")
     corpus_ids = load_corpus_ids(tok, args.corpus)
     if corpus_ids is not None:
         print(f"corpus={args.corpus}: {corpus_ids.shape[1]} tokens")
@@ -379,7 +384,8 @@ def main() -> int:
                 reporting.append_row(layer_csv, dict(ctx=ctx, rotation=rot, layer=li,
                                                      attn_out_relerr=round(rel, 6)))
 
-            for sink, kq, mode in itertools.product(sink_lengths, key_quants, rope_modes):
+            for sink, kq, mode, nbf in itertools.product(
+                    sink_lengths, key_quants, rope_modes, bf16_layer_counts):
                 pre = (mode == "pre")
                 # re-patch so the attention forward defers RoPE on keys iff pre.
                 patch_qwen2_attention(model, rotation=rot, seed=0, pre_rope=pre)
@@ -387,7 +393,7 @@ def main() -> int:
                 def make_turbo_cache():
                     return TurboKVCache(residual_length=rl, rotation="none",
                                         head_dim=D, bits=4, sink_length=sink,
-                                        key_quant=kq, pre_rope=pre)
+                                        key_quant=kq, pre_rope=pre, bf16_layers=nbf)
 
                 turbo_logits, _ = teacher_forced_window(model, make_turbo_cache, input_ids, W)
                 n_nonfinite = int((~torch.isfinite(turbo_logits)).sum())
@@ -399,13 +405,15 @@ def main() -> int:
                 turbo_ms, turbo_peak = decode_latency(model, input_ids, args.steps, make_turbo_cache)
 
                 if (not ops_done and rot == "rht" and sink == sink_lengths[0]
-                        and kq == key_quants[0] and mode == rope_modes[0]):
+                        and kq == key_quants[0] and mode == rope_modes[0]
+                        and nbf == bf16_layer_counts[0]):
                     profile_decode_ops(model, input_ids, make_turbo_cache, ops_csv)
                     ops_done = True
 
                 reporting.append_row(e2e_csv, dict(
                     ctx=ctx, rotation=rot, residual_length=rl, sink_length=sink,
-                    key_quant=kq, rope_mode=mode, corpus=args.corpus, eval_tokens=W,
+                    key_quant=kq, rope_mode=mode, bf16_layers=nbf, corpus=args.corpus,
+                    eval_tokens=W,
                     tf_kl=round(kls["tf_kl"], 6), tf_kl_median=round(kls["tf_kl_median"], 6),
                     tf_kl_p95=round(kls["tf_kl_p95"], 6), tf_argmax_match=round(argmax_match, 4),
                     n_nonfinite=n_nonfinite,
@@ -414,8 +422,8 @@ def main() -> int:
                     decode_ms_bf16=round(bf16_ms, 3), decode_ms_turbo=round(turbo_ms, 3),
                     peak_mb_bf16=round(bf16_peak, 1), peak_mb_turbo=round(turbo_peak, 1),
                 ))
-                print(f"[m8] ctx={ctx} {rot:5s} sink={sink} key={kq} rope={mode}: "
-                      f"tf_kl={kls['tf_kl']:.3e} "
+                print(f"[m9] ctx={ctx} {rot:5s} sink={sink} key={kq} rope={mode} "
+                      f"bf16L={nbf}: tf_kl={kls['tf_kl']:.3e} "
                       f"(med {kls['tf_kl_median']:.3e}) match={argmax_match:.3f} "
                       f"ppl_ratio={ppl_turbo / ppl_bf16:.3f} "
                       f"decode {turbo_ms:.2f}ms (bf16 {bf16_ms:.2f})")
