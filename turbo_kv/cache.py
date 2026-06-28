@@ -363,6 +363,10 @@ class TurboKVCache(_try_cache_base()):
             evK = wK[:, :, :n_evict, :]
             evV = wV[:, :, :n_evict, :]
             # route the first ``sink_length`` tokens of the stream to the BF16 sink.
+            # Eviction is FIFO (oldest first), so the sink greedily collects exactly
+            # the stream's first tokens — positions 0..sink-1 — staying position-
+            # aligned with reconstruction order (sink -> history -> window) and the
+            # arrival-order ``_pos`` buffer used by pre_rope.
             if self.sink_length > 0:
                 cur = 0 if self._sK[layer_idx] is None else self._sK[layer_idx].shape[2]
                 room = self.sink_length - cur
