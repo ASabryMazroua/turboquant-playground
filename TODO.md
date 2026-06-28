@@ -124,10 +124,32 @@ pending) · ✅ validated on A100.
 - [x] `tests/test_pre_rope.py` (RoPE reconstruction vs HF reference, short-context exactness, eviction position alignment, pre_rope-off no-op); `report_m8.py` (`m8_pre_rope` plot/table + gate ≤ post-RoPE KL); `benchmarks/_aml/turbo-m8-1gpu.yml` (placeholders)
 - [ ] **Gate (pending A100):** pre-RoPE tf_kl ≤ post-RoPE tf_kl at every context on WikiText (per-channel, rotation=none)
 
-### M9 — Early-layer bit allocation (QJL)  ⬜
-### M10 — Dense-and-sparse outliers (KVQuant + QJL)  ⬜
-### M11 — QJL done right: large-m key sign-sketch (QJL)  ⬜
-### M12 — Non-uniform quantization NUQ (KVQuant)  ⬜
-### M13 — Group-wise values + tuned residual buffer (KIVI/QJL)  ⬜
-### M14 — Attention-sink + per-channel combo (StreamingLLM/KVQuant)  ⬜
-### M15 — Fused int4 tensor-core kernel (best-effort Triton MMA)  ⬜
+### M9 — Early-layer bit allocation (QJL)  🧩
+- [x] `TurboKVCache(bf16_layers=N)` keeps the first N (sensitive) layers in full BF16, int4 the rest (M2 found layer 0 a huge outlier); `benchmark --bf16-layers 0,1,2`; `tests/test_early_layer_bits.py`; `report_m9.py` + `turbo-m9-1gpu.yml`
+- [ ] **Gate (pending A100):** per_token tf_kl non-increasing as bf16_layers grows; per_channel already near-lossless (memory-cost tradeoff shown)
+
+### M10 — Dense-and-sparse outliers (KVQuant + QJL)  🧩
+- [x] `packing.quantize_int4_per_token_outliers` (top-N |coords| kept fp16, range over the dense rest); `TurboKVCache(key_outliers=N)` per-token KEY path; `tests/test_outliers.py`; `report_m10.py` + `turbo-m10-1gpu.yml`
+- [ ] **Gate (pending A100):** per_token tf_kl at key_outliers=8 < at 0 (outliers rescue per-token int4, complementary to per-channel)
+
+### M11 — QJL done right: large-m key sign-sketch (QJL)  🧩
+- [x] `qjl.encode_key_direct`/`logits_direct`/`direct_bits_per_value` (sketch the rotated KEY directly at large m, no MSE base, +fp16 outliers); numerical study `benchmark_qjl_direct.py` (m∈{64..512}); `tests/test_qjl_direct.py`; `report_m11.py` + `turbo-m11-1gpu.yml`
+- [ ] **Gate (pending A100):** direct m=256 attn-KL ≤ the M6 prod-1b result at comparable bits (the field's real QJL beats our M6 residual-1bit)
+
+### M12 — Non-uniform quantization NUQ (KVQuant)  🧩
+- [x] `quantizers.fit_nuq_levels`/`fake_quantize_nuq` (per-group k-means/quantile reconstruction levels); numerical study `benchmark_nuq.py` (uniform vs nuq-quantile vs nuq-kmeans); `tests/test_nuq.py`; `report_m12.py` + `turbo-m12-1gpu.yml`
+- [ ] **Gate (pending A100):** nuq-kmeans attn-KL < uniform at matched bits (≤3) on the heavy-tailed regime
+
+### M13 — Group-wise values + tuned residual buffer (KIVI/QJL)  🧩
+- [x] `packing.quantize_int4_per_token_grouped` (one int4 scale per group of `value_group_size` coords); `TurboKVCache(value_group_size=G)` VALUE path; `residual_length` framed as the KIVI residual buffer; `benchmark --value-group-sizes 0,32`; `tests/test_value_groups.py`; `report_m13.py` + `turbo-m13-1gpu.yml`
+- [ ] **Gate (pending A100):** grouped (32) value tf_kl ≤ whole-head at the largest ctx
+
+### M14 — Attention-sink + per-channel combo (StreamingLLM/KVQuant)  🧩
+- [x] Verified `sink_length` composes correctly with per-channel keys + M8 pre-RoPE (FIFO eviction keeps sink at positions 0..sink-1, aligned with the `_pos` buffer) + M13 value groups; `tests/test_sink_combo.py`; `benchmark --sink-lengths 0,4,16`; `report_m14.py` + `turbo-m14-1gpu.yml`
+- [ ] **Gate (pending A100):** per-channel + small sink ≤ no-sink (cheap complement); per-token sink-alone insufficient (M4 reproduced)
+
+### M15 — Fused int4 tensor-core kernel (best-effort Triton MMA)  🧩
+- [x] `kernels/int4_logits_tc_triton.py` — int4→bf16 dequant per tile in SRAM + `tl.dot(allow_tf32=True)` on tensor cores (vs M5's exact fp32 `allow_tf32=False`); `tests/test_kernels_tc.py` (relerr < 1e-2); `benchmark_attention_micro_tc.py` (TC vs M5-exact vs bf16 cuBLAS); `report_m15.py` + `turbo-m15-1gpu.yml`
+- [ ] **Gate (pending A100):** TC kernel correct (relerr < 1e-2) AND faster than M5-exact for nq≥64 (narrows the cuBLAS gap); nq=1 decode expected tensor-core-starved (honest)
+
+> **Validation status:** all of M8–M15 are code-complete and `py_compile`-clean (local env has no torch/GPU). Real numbers come from a batched A100 run of the `turbo-m8..m15-1gpu.yml` jobs; each milestone's `report_*.py` + gate then fills in plots/tables and the ledger.
