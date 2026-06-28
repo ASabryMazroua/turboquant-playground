@@ -118,3 +118,95 @@ def prod_bits_per_value(bits: float, sketch: QJLSketch, *, head_dim: int = 64) -
     sketch_bits = sketch.sketch_bits_per_value()
     norm_bits = 16.0 / head_dim  # one bf16 ‖r‖ per token, amortized over d coords
     return recon + sketch_bits + norm_bits
+
+
+# ---------------------------------------------------------------------------
+# M11 — "QJL done right": direct large-m sign sketch of the key (no MSE base).
+#
+# M6 found the 1-bit *residual* sketch is variance-limited (only neutral near
+# ≈3.5-4 bits). The practical QJL / TurboQuant-prod of Zandieh et al. never
+# builds an MSE reconstruction base at all: it sketches the **rotated key
+# itself** with a LARGE Gaussian sign sketch (``m=256``, ``m=512`` early layers)
+# and keeps only ``sign(S·Rk) ∈ {±1}^m`` plus the scalar norm ``‖Rk‖``. Variance
+# of the unbiased IP estimator scales as ``1/m``, so a wide sketch — not a recon
+# base — is what buys low attention-KL. A handful of fp16 *outlier* coordinates
+# (the few extreme |coords| of ``Rk``) are stored exactly to remove their large
+# contribution to the sketch variance.
+#
+# Design decision (documented): we **zero the outlier coordinates of ``Rk``
+# before sketching**, so the sign sketch models only the dense/non-outlier part
+# (smaller ‖·‖ → lower variance), and the decode-time estimate adds back the
+# *exact* outlier inner-product term:
+#
+#     qᵀk ≈ \\widehat{(Rq)ᵀ Rk_dense}_{QJL}  +  (Rq)ᵀ Rk_outliers
+#
+# where ``Rk_dense`` is ``Rk`` with the top-``n_outliers`` |coords| set to 0.
+# ---------------------------------------------------------------------------
+
+
+def encode_key_direct(Rk, sketch: QJLSketch, n_outliers: int = 0):
+    """Direct QJL key encode — LARGE-m sign sketch of ``Rk`` itself, no MSE base.
+
+    Returns ``(signs, norm, out_idx, out_val)``:
+
+    * ``signs``/``norm`` — :meth:`QJLSketch.sketch` of ``Rk`` with the top
+      ``n_outliers`` |coords| of each key zeroed (so the sketch models the dense
+      part only; ``norm = ‖Rk_dense‖``).
+    * ``out_idx`` ``[nk, n_outliers]`` long / ``out_val`` ``[nk, n_outliers]``
+      fp16 — the exact (signed) outlier coordinates, or ``(None, None)`` when
+      ``n_outliers == 0``.
+    """
+    import torch
+
+    n_outliers = int(n_outliers)
+    if n_outliers <= 0:
+        signs, norm = sketch.sketch(Rk)
+        return signs, norm, None, None
+
+    k = min(n_outliers, Rk.shape[-1])
+    out_idx = torch.topk(Rk.abs(), k=k, dim=-1).indices        # [nk, k] long
+    out_val = torch.gather(Rk, -1, out_idx).to(torch.float16)  # signed, fp16
+    dense = Rk.clone()
+    dense.scatter_(-1, out_idx, torch.zeros_like(out_val, dtype=Rk.dtype))
+    signs, norm = sketch.sketch(dense)
+    return signs, norm, out_idx, out_val
+
+
+def logits_direct(Rq, signs, norm, sketch: QJLSketch, *, out_idx=None, out_val=None,
+                  Rk_for_outliers=None):
+    """Unbiased direct-QJL logit matrix ``[nq, nk]`` = sketch IP estimate of the
+    dense part ``+`` exact outlier IP.
+
+    ``out_idx``/``out_val`` come from :func:`encode_key_direct`. The outlier term
+    is built as a sparse ``[nk, D]`` matrix (zeros except each key's outlier
+    coords ``= out_val``) so ``Rq @ outlier_mat.t()`` adds the exact, per-key
+    ``Rq[:, idx]·val`` contribution with the correct ``[nq, nk]`` shape. If
+    ``out_val`` is ``None`` but ``Rk_for_outliers`` is given, the exact values
+    are gathered from it instead.
+    """
+    import torch
+
+    base = sketch.estimate_matrix(Rq, signs, norm)             # [nq, nk]
+    if out_idx is None or (out_val is None and Rk_for_outliers is None):
+        return base
+
+    nk = base.shape[1]
+    D = Rq.shape[-1]
+    out_idx = out_idx.to(torch.long)
+    if out_val is not None:
+        vals = out_val.to(Rq.dtype)
+    else:
+        vals = torch.gather(Rk_for_outliers, -1, out_idx).to(Rq.dtype)
+    outlier_mat = torch.zeros(nk, D, device=Rq.device, dtype=Rq.dtype)
+    outlier_mat.scatter_(-1, out_idx, vals)                    # [nk, D] sparse
+    return base + Rq @ outlier_mat.t()
+
+
+def direct_bits_per_value(sketch: QJLSketch, *, head_dim: int = 64, n_outliers: int = 0) -> float:
+    """Realized rate of direct QJL: ``m`` sign bits + bf16 ‖Rk‖ + fp16 outliers
+    (value + index), all amortized over ``head_dim`` coordinates."""
+    sign_bits = sketch.m / head_dim
+    norm_bits = 16.0 / head_dim
+    idx_bits = math.ceil(math.log2(head_dim)) if head_dim > 1 else 0
+    outlier_bits = int(n_outliers) * (16.0 + idx_bits) / head_dim
+    return sign_bits + norm_bits + outlier_bits
