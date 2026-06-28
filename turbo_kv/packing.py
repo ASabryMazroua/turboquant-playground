@@ -80,3 +80,54 @@ def quantize_int4_per_channel(x):
     codes = torch.clamp(torch.round((x - lo) / scale), 0, INT4_LEVELS - 1).to(torch.uint8)
     return codes, scale, lo
 
+
+def quantize_int4_per_token_outliers(x, n_outliers: int):
+    """Dense-and-sparse per-token quant (KVQuant/QJL) of ``x`` ``[..., T, D]``.
+
+    The per-token *key* failure mode (M4): a few outlier coordinates inflate the
+    whole token's int4 range, crushing the other ~60 coordinates. We keep the top
+    ``n_outliers`` coordinates per token in fp16 (sparse side-channel) and compute
+    the affine min/max over the **non-outlier** coordinates only, so the dense
+    rest gets the full int4 grid. Outlier positions are still quantized (clamped)
+    to keep the packed shape uniform, but are overwritten on reconstruction.
+
+    Returns ``(codes uint8, scale, lo, out_idx int16, out_val)`` where ``out_idx``
+    is ``[..., T, n_outliers]`` and ``out_val`` holds the original outlier values
+    (kept in the input dtype). ``n_outliers=0`` degenerates to the dense per-token
+    path with empty outlier tensors.
+    """
+    import torch
+
+    in_dtype = x.dtype
+    xf = x.to(torch.float32)
+    if n_outliers <= 0:
+        codes, scale, lo = quantize_int4_per_token(xf)
+        out_idx = torch.empty(*xf.shape[:-1], 0, dtype=torch.int16, device=xf.device)
+        out_val = torch.empty(*xf.shape[:-1], 0, dtype=in_dtype, device=xf.device)
+        return codes, scale, lo, out_idx, out_val
+
+    n = min(int(n_outliers), xf.shape[-1])
+    _, out_idx = torch.topk(xf.abs(), n, dim=-1)             # [..., T, n]
+    mask = torch.zeros_like(xf, dtype=torch.bool)
+    mask.scatter_(-1, out_idx, True)                          # True at outliers
+    # affine range over the NON-outlier coords only.
+    lo = torch.where(mask, xf.new_full((), float("inf")), xf).amin(dim=-1, keepdim=True)
+    hi = torch.where(mask, xf.new_full((), float("-inf")), xf).amax(dim=-1, keepdim=True)
+    scale = ((hi - lo) / (INT4_LEVELS - 1)).clamp_min(1e-8)
+    codes = torch.clamp(torch.round((xf - lo) / scale), 0, INT4_LEVELS - 1).to(torch.uint8)
+    out_val = xf.gather(-1, out_idx).to(in_dtype)            # fp16 outlier values
+    return codes, scale, lo, out_idx.to(torch.int16), out_val
+
+
+def dequantize_int4_per_token_outliers(codes, scale, lo, out_idx, out_val):
+    """Inverse of :func:`quantize_int4_per_token_outliers` → float32.
+
+    Dequant the dense per-token grid, then ``scatter_`` the fp16 outlier values
+    back into their ``out_idx`` positions along the last dim (exact at outliers).
+    """
+    deq = dequantize_int4_per_token(codes.to(scale.dtype), scale, lo).to(torch.float32)
+    if out_idx.numel() == 0:
+        return deq
+    deq.scatter_(-1, out_idx.to(torch.int64), out_val.to(torch.float32))
+    return deq
+

@@ -48,6 +48,7 @@ class TurboKVCache(_try_cache_base()):
         key_group_size: int = 32,
         pre_rope: bool = False,
         bf16_layers: int = 0,
+        key_outliers: int = 0,
     ) -> None:
         super().__init__()
         if bits != 4:
@@ -79,6 +80,14 @@ class TurboKVCache(_try_cache_base()):
         # BF16 (never evict/compress) and int4 the rest. ``bf16_layers=0`` is
         # byte-for-byte identical to the all-int4 cache.
         self.bf16_layers = int(bf16_layers)
+        # Dense-and-sparse outliers (KVQuant + QJL): for the PER-TOKEN key path
+        # only, keep the top ``key_outliers`` coordinates per key vector in fp16
+        # (a sparse side-channel) and quantize the dense rest, so a few extreme
+        # coordinates no longer inflate the whole token's int4 scale (the M4
+        # per-token key failure mode). No-op for per_channel keys (per-channel
+        # already isolates channel outliers with its own scale) and for values.
+        # ``key_outliers=0`` is byte-for-byte identical to the all-dense cache.
+        self.key_outliers = int(key_outliers)
 
         self._rot: Optional[R.Rotation] = None  # built lazily on first update
         # Per-layer compressed store (packed codes + per-token scale/zero).
@@ -152,11 +161,13 @@ class TurboKVCache(_try_cache_base()):
                 self.rotation_kind, self.head_dim, seed=self.seed, device=device, dtype=dtype
             )
 
-    def _compress(self, x, axis: str = "token"):
+    def _compress(self, x, axis: str = "token", n_outliers: int = 0):
         """[B,H,T,D] BF16 → packed int4 dict (rotate → quant → pack).
 
         ``axis='token'`` (one scale per token) or ``'channel'`` (one scale per
         coordinate over the whole evicted block — the KIVI key scheme).
+        ``n_outliers>0`` (token axis only, keys only) keeps the top-N per-token
+        coordinates in fp16 (dense-and-sparse, KVQuant/QJL) and quantizes the rest.
         """
         import torch
 
@@ -171,6 +182,20 @@ class TurboKVCache(_try_cache_base()):
                 "T": x.shape[2],
                 "D": x.shape[3],
                 "axis": "channel",
+            }
+        if n_outliers > 0:
+            codes, scale, lo, out_idx, out_val = P.quantize_int4_per_token_outliers(
+                xr, n_outliers)
+            return {
+                "packed": P.pack_int4(codes),
+                "scale": scale.to(torch.bfloat16),
+                "lo": lo.to(torch.bfloat16),
+                "out_idx": out_idx,                  # [B,H,T,n_outliers] int16
+                "out_val": out_val.to(torch.bfloat16),
+                "outliers": int(n_outliers),
+                "T": x.shape[2],
+                "D": x.shape[3],
+                "axis": "token",
             }
         codes, scale, lo = P.quantize_int4_per_token(xr)
         return {
@@ -193,6 +218,10 @@ class TurboKVCache(_try_cache_base()):
             scale = store["scale"].to(torch.float32).repeat_interleave(sizes, dim=2)
             lo = store["lo"].to(torch.float32).repeat_interleave(sizes, dim=2)
             deq = codes * scale + lo
+        elif store.get("outliers", 0) > 0:
+            deq = P.dequantize_int4_per_token_outliers(
+                codes, store["scale"].to(torch.float32), store["lo"].to(torch.float32),
+                store["out_idx"], store["out_val"].to(torch.float32))
         else:
             deq = P.dequantize_int4_per_token(
                 codes, store["scale"].to(torch.float32), store["lo"].to(torch.float32))
@@ -214,6 +243,18 @@ class TurboKVCache(_try_cache_base()):
                 "T": dst["T"] + src["T"],
                 "D": dst["D"],
                 "axis": "channel",
+            }
+        if src.get("outliers", 0) > 0:
+            return {
+                "packed": torch.cat([dst["packed"], src["packed"]], dim=2),
+                "scale": torch.cat([dst["scale"], src["scale"]], dim=2),
+                "lo": torch.cat([dst["lo"], src["lo"]], dim=2),
+                "out_idx": torch.cat([dst["out_idx"], src["out_idx"]], dim=2),
+                "out_val": torch.cat([dst["out_val"], src["out_val"]], dim=2),
+                "outliers": src["outliers"],
+                "T": dst["T"] + src["T"],
+                "D": dst["D"],
+                "axis": "token",
             }
         return {
             "packed": torch.cat([dst["packed"], src["packed"]], dim=2),
@@ -288,8 +329,11 @@ class TurboKVCache(_try_cache_base()):
                     self._sV[layer_idx] = sV if self._sV[layer_idx] is None else torch.cat([self._sV[layer_idx], sV], dim=2)
                     evK, evV = evK[:, :, take:, :], evV[:, :, take:, :]
             if evK.shape[2] > 0:
-                self._cK[layer_idx] = self._append_store(self._cK[layer_idx], self._compress(evK, self._key_axis))
-                self._cV[layer_idx] = self._append_store(self._cV[layer_idx], self._compress(evV, "token"))
+                self._cK[layer_idx] = self._append_store(
+                    self._cK[layer_idx],
+                    self._compress(evK, self._key_axis, n_outliers=self.key_outliers))
+                self._cV[layer_idx] = self._append_store(
+                    self._cV[layer_idx], self._compress(evV, "token"))
             wK = wK[:, :, n_evict:, :].contiguous()
             wV = wV[:, :, n_evict:, :].contiguous()
         self._wK[layer_idx] = wK
@@ -367,14 +411,22 @@ class TurboKVCache(_try_cache_base()):
         When ``pre_rope`` is on, the per-layer int32 positions buffer is also
         counted (``position_bytes``); it is a handful of bytes per token and does
         not change the ~4x memory win.
+
+        When ``key_outliers`` is on (per-token keys), the sparse fp16 outlier
+        side-channel is counted in ``outlier_bytes`` (and folded into the total):
+        a real cost of ``n_outliers*(2 bytes idx + 2 bytes val)`` per stored key
+        token, the price paid to rescue the dense int4 grid.
         """
-        packed = scale_zero = window = position = 0
+        packed = scale_zero = window = position = outlier = 0
         for layer_idx in range(len(self._wK)):
             for store in (self._cK[layer_idx], self._cV[layer_idx]):
                 if store is not None:
                     packed += store["packed"].numel() * store["packed"].element_size()
                     scale_zero += store["scale"].numel() * store["scale"].element_size()
                     scale_zero += store["lo"].numel() * store["lo"].element_size()
+                    if store.get("outliers", 0) > 0:
+                        outlier += store["out_idx"].numel() * store["out_idx"].element_size()
+                        outlier += store["out_val"].numel() * store["out_val"].element_size()
             for w in (self._wK[layer_idx], self._wV[layer_idx],
                       self._sK[layer_idx], self._sV[layer_idx]):
                 if w is not None:
@@ -387,5 +439,6 @@ class TurboKVCache(_try_cache_base()):
             "scale_zero_bytes": scale_zero,
             "window_bytes": window,
             "position_bytes": position,
-            "total_bytes": packed + scale_zero + window + position,
+            "outlier_bytes": outlier,
+            "total_bytes": packed + scale_zero + window + position + outlier,
         }
