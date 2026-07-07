@@ -330,6 +330,13 @@ def main() -> int:
                     help="comma list of VALUE group sizes (KIVI/AWQ group-wise int4 "
                          "values; 0 = whole-head per-token, no change; >0 must divide "
                          "head_dim)")
+    ap.add_argument("--qjl-m", default="256",
+                    help="comma list of QJL sign-sketch sizes m for key_quant='qjl' "
+                         "(M16 end-to-end; estimator variance ~ 1/m). Swept only for "
+                         "the 'qjl' key-quant; ignored otherwise")
+    ap.add_argument("--qjl-outliers", default="0",
+                    help="comma list of exact fp16 outlier coords kept per key for "
+                         "key_quant='qjl' (KVQuant/QJL dense-and-sparse rescue)")
     ap.add_argument("--corpus", default="synthetic",
                     help="'synthetic' (tiled + held-out eval) or 'wikitext' (real prose)")
     ap.add_argument("--out-dir", default="outputs")
@@ -357,6 +364,9 @@ def main() -> int:
     bf16_layer_counts = [int(x) for x in args.bf16_layers.split(",")]
     key_outlier_counts = [int(x) for x in args.key_outliers.split(",")]
     value_group_sizes = [int(x) for x in args.value_group_sizes.split(",")]
+    qjl_ms = [int(x) for x in args.qjl_m.split(",")]
+    qjl_outs = [int(x) for x in args.qjl_outliers.split(",")]
+    print(f"qjl: m={qjl_ms} outliers={qjl_outs}")
     print(f"model: layers={nL} kv_heads={nKV} head_dim={D} residual_length={rl} "
           f"sinks={sink_lengths} key_quants={key_quants} rope_modes={rope_modes} "
           f"bf16_layers={bf16_layer_counts} key_outliers={key_outlier_counts} "
@@ -398,50 +408,63 @@ def main() -> int:
                     sink_lengths, key_quants, rope_modes, bf16_layer_counts,
                     key_outlier_counts, value_group_sizes):
                 pre = (mode == "pre")
+                if kq == "qjl" and pre:
+                    # QJL sketches the post-RoPE key (it never reconstructs a key
+                    # to re-apply RoPE to) — skip the incompatible combo.
+                    continue
                 # re-patch so the attention forward defers RoPE on keys iff pre.
                 patch_qwen2_attention(model, rotation=rot, seed=0, pre_rope=pre)
 
-                def make_turbo_cache():
-                    return TurboKVCache(residual_length=rl, rotation="none",
-                                        head_dim=D, bits=4, sink_length=sink,
-                                        key_quant=kq, pre_rope=pre, bf16_layers=nbf,
-                                        key_outliers=ko, value_group_size=vgs)
+                # QJL sweeps its (m, outliers) grid; every other key-quant runs once.
+                qjl_grid = ([(m, o) for m in qjl_ms for o in qjl_outs]
+                            if kq == "qjl" else [(0, 0)])
+                for qm, qo in qjl_grid:
+                    def make_turbo_cache(qm=qm, qo=qo):
+                        return TurboKVCache(residual_length=rl, rotation="none",
+                                            head_dim=D, bits=4, sink_length=sink,
+                                            key_quant=kq, pre_rope=pre, bf16_layers=nbf,
+                                            key_outliers=ko, value_group_size=vgs,
+                                            qjl_m=(qm or 256), qjl_outliers=qo)
 
-                turbo_logits, _ = teacher_forced_window(model, make_turbo_cache, input_ids, W)
-                n_nonfinite = int((~torch.isfinite(turbo_logits)).sum())
-                if n_nonfinite:
-                    print(f"[m4][WARN] ctx={ctx} {rot} sink={sink}: {n_nonfinite} non-finite logits")
-                kls = kl_stats(ref_logits, turbo_logits)
-                argmax_match = (ref_logits.argmax(-1) == turbo_logits.argmax(-1)).float().mean().item()
-                ppl_turbo = window_perplexity(turbo_logits, targets)
-                turbo_ms, turbo_peak = decode_latency(model, input_ids, args.steps, make_turbo_cache)
+                    turbo_logits, _ = teacher_forced_window(model, make_turbo_cache, input_ids, W)
+                    n_nonfinite = int((~torch.isfinite(turbo_logits)).sum())
+                    if n_nonfinite:
+                        print(f"[m4][WARN] ctx={ctx} {rot} sink={sink}: {n_nonfinite} non-finite logits")
+                    kls = kl_stats(ref_logits, turbo_logits)
+                    argmax_match = (ref_logits.argmax(-1) == turbo_logits.argmax(-1)).float().mean().item()
+                    ppl_turbo = window_perplexity(turbo_logits, targets)
+                    turbo_ms, turbo_peak = decode_latency(model, input_ids, args.steps, make_turbo_cache)
 
-                if (not ops_done and rot == "rht" and sink == sink_lengths[0]
-                        and kq == key_quants[0] and mode == rope_modes[0]
-                        and nbf == bf16_layer_counts[0] and ko == key_outlier_counts[0]
-                        and vgs == value_group_sizes[0]):
-                    profile_decode_ops(model, input_ids, make_turbo_cache, ops_csv)
-                    ops_done = True
+                    if (not ops_done and rot == "rht" and sink == sink_lengths[0]
+                            and kq == key_quants[0] and mode == rope_modes[0]
+                            and nbf == bf16_layer_counts[0] and ko == key_outlier_counts[0]
+                            and vgs == value_group_sizes[0]):
+                        profile_decode_ops(model, input_ids, make_turbo_cache, ops_csv)
+                        ops_done = True
 
-                reporting.append_row(e2e_csv, dict(
-                    ctx=ctx, rotation=rot, residual_length=rl, sink_length=sink,
-                    key_quant=kq, rope_mode=mode, bf16_layers=nbf, key_outliers=ko,
-                    value_group_size=vgs,
-                    corpus=args.corpus,
-                    eval_tokens=W,
-                    tf_kl=round(kls["tf_kl"], 6), tf_kl_median=round(kls["tf_kl_median"], 6),
-                    tf_kl_p95=round(kls["tf_kl_p95"], 6), tf_argmax_match=round(argmax_match, 4),
-                    n_nonfinite=n_nonfinite,
-                    ppl_bf16=round(ppl_bf16, 4), ppl_turbo=round(ppl_turbo, 4),
-                    ppl_ratio=round(ppl_turbo / ppl_bf16, 4),
-                    decode_ms_bf16=round(bf16_ms, 3), decode_ms_turbo=round(turbo_ms, 3),
-                    peak_mb_bf16=round(bf16_peak, 1), peak_mb_turbo=round(turbo_peak, 1),
-                ))
-                print(f"[m13] ctx={ctx} {rot:5s} sink={sink} key={kq} rope={mode} "
-                      f"bf16L={nbf} ko={ko} vgs={vgs}: tf_kl={kls['tf_kl']:.3e} "
-                      f"(med {kls['tf_kl_median']:.3e}) match={argmax_match:.3f} "
-                      f"ppl_ratio={ppl_turbo / ppl_bf16:.3f} "
-                      f"decode {turbo_ms:.2f}ms (bf16 {bf16_ms:.2f})")
+                    reporting.append_row(e2e_csv, dict(
+                        ctx=ctx, rotation=rot, residual_length=rl, sink_length=sink,
+                        key_quant=kq, rope_mode=mode, bf16_layers=nbf, key_outliers=ko,
+                        value_group_size=vgs,
+                        qjl_m=(qm if kq == "qjl" else 0),
+                        qjl_outliers=(qo if kq == "qjl" else 0),
+                        corpus=args.corpus,
+                        eval_tokens=W,
+                        tf_kl=round(kls["tf_kl"], 6), tf_kl_median=round(kls["tf_kl_median"], 6),
+                        tf_kl_p95=round(kls["tf_kl_p95"], 6), tf_argmax_match=round(argmax_match, 4),
+                        n_nonfinite=n_nonfinite,
+                        ppl_bf16=round(ppl_bf16, 4), ppl_turbo=round(ppl_turbo, 4),
+                        ppl_ratio=round(ppl_turbo / ppl_bf16, 4),
+                        decode_ms_bf16=round(bf16_ms, 3), decode_ms_turbo=round(turbo_ms, 3),
+                        peak_mb_bf16=round(bf16_peak, 1), peak_mb_turbo=round(turbo_peak, 1),
+                    ))
+                    print(f"[m16] ctx={ctx} {rot:5s} sink={sink} key={kq} rope={mode} "
+                          f"bf16L={nbf} ko={ko} vgs={vgs} qm={qm} qo={qo}: "
+                          f"tf_kl={kls['tf_kl']:.3e} "
+                          f"(med {kls['tf_kl_median']:.3e}) match={argmax_match:.3f} "
+                          f"ppl_ratio={ppl_turbo / ppl_bf16:.3f} "
+                          f"decode {turbo_ms:.2f}ms (bf16 {bf16_ms:.2f}) "
+                          f"peak {turbo_peak:.0f}MB (bf16 {bf16_peak:.0f})")
 
     unpatch_qwen2_attention(model)
     print(f"\nwrote {e2e_csv}\nwrote {layer_csv}\nwrote {ops_csv}")

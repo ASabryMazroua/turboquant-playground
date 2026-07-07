@@ -1,0 +1,21 @@
+op,cuda_us,pct
+aten::cat,5019.0,14.67
+"void at::native::elementwise_kernel<128, 2, at::",3706.0,10.83
+"void at::native::elementwise_kernel<128, 2, at::",3456.0,10.1
+aten::copy_,2792.0,8.16
+aten::add,2147.0,6.27
+aten::sub,1824.0,5.33
+cudaLaunchKernel,1367.0,3.99
+aten::mm,1166.0,3.41
+aten::mul,952.0,2.78
+"std::enable_if<!(false), void>::type internal::g",910.0,2.66
+void at::native::(anonymous namespace)::CatArray,864.0,2.52
+"void at::native::elementwise_kernel<128, 4, at::",840.0,2.45
+void at::native::unrolled_elementwise_kernel<at:,832.0,2.43
+void at::native::unrolled_elementwise_kernel<at:,719.0,2.1
+ampere_bf16_s16816gemm_bf16_64x64_ldg8_f2f_stage,682.0,1.99
+"void at::native::elementwise_kernel<128, 2, at::",609.0,1.78
+aten::_flash_attention_forward,479.0,1.4
+aten::addmm,426.0,1.24
+void pytorch_flash::flash_fwd_splitkv_kernel<pyt,383.0,1.12
+aten::div,347.0,1.01

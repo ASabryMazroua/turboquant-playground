@@ -77,6 +77,26 @@ class QJLSketch:
         coeff = math.sqrt(math.pi / 2.0) / self.m
         return coeff * (qproj @ s.t()) * norm.reshape(1, -1)   # [nq, nk]
 
+    def estimate_batched(self, q, signs, norm):
+        """Batched unbiased IP estimate over arbitrary leading (broadcast) dims.
+
+        ``q`` ``[..., nq, d]``; ``signs`` ``[..., nk, m]`` bool; ``norm``
+        ``[..., nk, 1]`` → ``[..., nq, nk]``. The leading batch dims of ``q`` and
+        the sketch tensors must be broadcastable (e.g. ``q`` carries a GQA group
+        axis the per-kv-head ``signs``/``norm`` broadcast over). This is the
+        end-to-end (M16) entry point: it never materialises a reconstructed key,
+        only the ``[..., nq, nk]`` logit block (which the caller chunks over
+        ``nq`` to bound prefill memory).
+        """
+        import torch
+
+        S = self._ensure(q.device, q.dtype)
+        qproj = q @ S.t()                                  # [..., nq, m]
+        s = signs.to(q.dtype) * 2.0 - 1.0                  # [..., nk, m]
+        coeff = math.sqrt(math.pi / 2.0) / self.m
+        est = coeff * torch.matmul(qproj, s.transpose(-1, -2))   # [..., nq, nk]
+        return est * norm.transpose(-1, -2)                # norm [...,nk,1]->[...,1,nk]
+
     def sketch_bits_per_value(self) -> float:
         """Sketch storage in bits per stored key *value* (m sign bits over d coords)."""
         return self.m / self.dim

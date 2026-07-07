@@ -81,6 +81,21 @@ def _turbo_sdpa_forward(
     assert k.shape[1] == self.num_key_value_heads and k.shape[-1] == self.head_dim
     assert v.shape[1] == self.num_key_value_heads and v.shape[-1] == self.head_dim
 
+    if past_key_value is not None and getattr(past_key_value, "key_quant", None) == "qjl":
+        # QJL end-to-end (M16): the cache estimates qᵀk from a sign sketch of the
+        # rotated keys (no key reconstruction → no SDPA) and returns the rotated
+        # attention output directly. We then apply the single inverse rotation.
+        o_rot = past_key_value.qjl_update_and_attend(
+            q, k, v, self.layer_idx,
+            num_key_value_groups=self.num_key_value_groups,
+            scaling=self.head_dim ** -0.5,
+            attention_mask=attention_mask,
+        )
+        attn_out = rot.inverse(o_rot.float()).to(in_dtype)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, q_len, self.hidden_size)
+        attn_out = self.o_proj(attn_out)
+        return attn_out, None, past_key_value
+
     if past_key_value is not None:
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
         if pre_rope:

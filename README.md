@@ -68,7 +68,7 @@ single **A100‑80GB**. Each experiment is one GPU job; results are downloaded a
 
 ---
 
-## 4. Six findings worth your time
+## 4. Seven findings worth your time
 
 ### Finding 1 — Rotation only helps if you quantize *per token*
 
@@ -237,6 +237,44 @@ The rest of the toolbox, measured honestly:
 > them *independently* rescue the same failure. Reproducing a paper means reproducing its whole
 > checklist, not just its headline equation.
 
+### Finding 7 — Wiring QJL end‑to‑end: an unbiased estimator attention can't use
+
+Finding 6 left one thread dangling: QJL had only ever been a *numeric* study. So I did the honest thing
+and wired it into real generation. This is genuinely different from every other cache here — QJL keeps
+only a **sign sketch** of each key, never a key you can reconstruct, so there is no tensor to hand to
+flash‑attention. I had to write a custom attention path: estimate `qᵀk` from the sketch for old tokens,
+keep the recent window exact in BF16, and **chunk the query** so a 16k prefill doesn't allocate a
+16k×16k score matrix.
+
+Then I gave it every advantage the field prescribes — the RHT rotation it's designed for, a wide sketch
+(`m=512`), and 8 fp16 outlier coordinates — and it still **failed, badly**:
+
+![QJL end‑to‑end vs per‑token / per‑channel int4](results/plots/m16_qjl_e2e.png)
+
+| ctx | per‑token int4 | **QJL (best: m=512, 8 outliers, ≈11 bits)** | per‑channel int4 |
+| --- | --- | --- | --- |
+| 4k | 15.6× | **41.9×** | 1.02× |
+| 8k | 47.3× | **77.4×** | 1.03× |
+| 16k | 55.7× | **36.8×** | 1.01× |
+
+Even at **2.7× the bit cost of int4**, QJL is ~37× worse than 4‑bit per‑channel and doesn't reliably
+beat the per‑token disaster. The mechanism is the whole point, and the ablation is clean:
+
+![QJL ablation: outliers and m help, but variance stays fatal](results/plots/m16_qjl_ablation.png)
+
+A wider sketch and fp16 outliers *do* help, exactly as the theory says — at 16k they drag QJL from
+**483× down to 37×** — but they can't win. The reason is **bias vs variance**. QJL's estimate of each
+logit is *unbiased* but *noisy*; int4 is *biased* but *stable*. Softmax attention over thousands of keys
+is exquisitely sensitive to per‑logit **variance** — every noisy score is a fresh chance to spuriously
+win the max — so a consistent bias is survivable while random noise scatters the attention and perplexity
+explodes. And because the sketch forbids flash‑attention, the manual path materialises the score matrix:
+**6.3× the memory of the BF16 baseline** it was trying to beat.
+
+> **Lesson:** *unbiased* is not the same as *good for attention*. When you softmax over many keys, low
+> variance beats zero bias — which is exactly why the field quantizes KV per‑channel (Finding 5) and
+> saves the JL sketch for **retrieval**, where there's no per‑channel scale to lean on. This turns
+> Finding 6's tentative "QJL costs more bits" into a measured, end‑to‑end verdict.
+
 ---
 
 ## 5. The one‑paragraph thesis
@@ -253,7 +291,10 @@ inner‑product‑optimal** — and **quantize keys per channel** — are the tw
 Pushing through the field's full recipe (Finding 6) drove both home: *three* independent changes —
 per‑channel keys, keeping the one outlier layer in BF16, or a handful of fp16 outlier coordinates — each
 turn the 55× failure near‑lossless, while non‑uniform quantization cutting reconstruction error *without*
-helping attention is the MSE≠inner‑product lesson a third time.
+helping attention is the MSE≠inner‑product lesson a third time. Finally, wiring the unbiased QJL sketch
+into real generation (Finding 7) fails where the numbers promised it might: unbiased‑but‑noisy logits
+wreck softmax attention over thousands of keys, so **per‑channel int4 stays the answer** and QJL belongs
+in retrieval — low variance beats zero bias.
 
 ## 6. Reproduce it
 
@@ -297,8 +338,9 @@ is in [`results/runs.md`](results/runs.md).
 
 - One model (0.5B) on one GPU (A100). Trends should hold but absolute numbers won't transfer blindly.
 - `head_dim=64` is the worst case for a custom kernel beating cuBLAS; bigger heads would narrow the gap.
-- The QJL study is a numeric inner‑product analysis; I did **not** wire QJL back into end‑to‑end
-  generation (the natural next step).
+- QJL is now wired **end‑to‑end** (Finding 7), not just a numeric study — and the honest result is that
+  it's the wrong tool for dense KV attention at this head size (unbiased but too high‑variance); its
+  home is retrieval. Per‑channel int4 remains the recommended cache.
 - The "dense" (Haar) rotation is included as a *control* — it has great reconstruction but breaks
   attention, which is itself a nice illustration of Finding 3.
 

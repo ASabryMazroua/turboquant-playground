@@ -153,3 +153,25 @@ pending) · ✅ validated on A100.
 - [ ] **Gate (pending A100):** TC kernel correct (relerr < 1e-2) AND faster than M5-exact for nq≥64 (narrows the cuBLAS gap); nq=1 decode expected tensor-core-starved (honest)
 
 > **Validation status (A100, 2026-06-28):** all eight ran on A100. **Gates PASS** for M8, M9, M10, M12, M13, M14, M15; **M11 PARTIAL** (QJL validated and beats the M6 1-bit sketch, but costs more bits than per-channel int4 — honest). M10 **failed first** (a missing lazy `import torch` in the outlier dequant path that `py_compile` can't catch) → fixed → rerun PASS. Headlines: **three independent rescues** of per-token int4 — per-channel keys (M7, →1.01×), one BF16 layer (M9, →1.34×), 8 fp16 outliers (M10, →2.27×); NUQ minimizing MSE without helping attention is the MSE≠inner-product lesson a third time. Per-fix plots in `results/plots/`, gates in `results/tables/`, full ledger in [results/runs.md](results/runs.md), narrative in README Finding 6.
+
+---
+
+## M16 — QJL wired into end-to-end generation (the README "natural next step")  🧩 (code-complete + locally validated; pending A100)
+
+M6/M11 validated the unbiased inner-product QJL sign sketch only as a *numeric*
+study. README §7 flagged the gap: "I did **not** wire QJL back into end-to-end
+generation (the natural next step)." M16 closes that loop with a **custom
+attention path** — QJL estimates `qᵀk` from `sign(S·Rk)` + `‖Rk‖`, so it can't use
+the "reconstruct K → SDPA" path.
+
+- [x] `turbo_kv/qjl.py`: `QJLSketch.estimate_batched` (broadcasts the GQA group axis; matmul-based unbiased IP estimate over arbitrary leading dims)
+- [x] `turbo_kv/cache.py`: `key_quant="qjl"` (params `qjl_m=256`, `qjl_outliers`, `qjl_chunk=2048`); `_encode_qjl_key` (large-m sign sketch + fp16 outliers); `_append_store`/`memory_bytes` qjl branch (sign bits counted at the bit-packed ideal); **`qjl_update_and_attend`** + **`_qjl_attend`** — history via QJL estimate, sink+window exact (BF16), values int4-dequant, **query-chunked** so 16k prefill never builds the full `[q,T]` score matrix; pre_rope rejected (can't re-RoPE a sketch). `super().__init__()` made best-effort (version-portable Cache base)
+- [x] `turbo_kv/qwen_patch.py`: QJL branch — bypass cache.update + SDPA, call `qjl_update_and_attend`, apply the single inverse rotation
+- [x] `tests/test_qjl_e2e.py`: batched attend == 2D `logits_direct`/`estimate_matrix` (±outliers); chunking numerically invariant; all-window == exact SDPA; GQA 14/2 shapes; decode==prefill; **QJL beats per-token int4 on channel outliers**; pre_rope+qjl raises; memory counts sketch — **9/9 pass locally (CPU torch)**, full suite **120 passed / 2 skipped** (1 pre-existing unrelated `test_outliers` env edge)
+- [x] `benchmarks/benchmark_qwen_turbo.py`: `--qjl-m`/`--qjl-outliers`, allow `qjl` in `--key-quants`, skip qjl+pre combo, CSV cols `qjl_m`/`qjl_outliers`
+- [x] `benchmarks/report_m16.py` (per_token vs per_channel vs qjl ppl_ratio bars + realized key-bits + gate) + `benchmarks/_aml/turbo-m16-1gpu.yml` (WikiText sweep, pytest gate)
+- [x] **Gate FAIL (honest negative — definitive):** on WikiText, even QJL's best config (RHT + m=512 + 8 fp16 outliers, ~11 bits/val) is ppl_ratio **42×/77×/37×** (4k/8k/16k) — worse than per-token int4 (15.6/47.3/55.7×) and **~36× off** per-channel (~1.01×). Two jobs: `plum_parrot_z14mw5hqnj` (outliers=0 worst case, 230×/2316×/483×) → comprehensive sweep `magenta_rail_0jtnplnjs2` (rotations {none,rht} × m {256,512} × outliers {0,8}). pytest 33/33 both. `per_token`/`per_channel` **exactly reproduce M7** → harness sound, catastrophe real.
+- [x] Submitted + logged (`results/runs.md`); copied `turbo_e2e.csv` → `results/turbo_e2e_qjl.csv` (36 rows); ran `report_m16.py` (plots `m16_qjl_e2e` + `m16_qjl_ablation`, `m16_gate.md`); README **Finding 7** added + §7 limitation closed
+- **Key finding:** the unbiased QJL estimator is **high-variance**, and softmax over thousands of keys is exquisitely sensitive to per-logit variance (spurious-max) → **unbiased ≠ good for attention**; low variance beats zero bias. Clean ablation: m + outliers cut 483×→37× (as theory predicts) but can't close the gap. Bonus failure: no key reconstruction → no flash-attention → 6.3× BF16 memory. **Per-channel int4 (M7) stays the answer; QJL's home is retrieval.** Extends M11 PARTIAL from numeric → end-to-end.
+
+
