@@ -47,20 +47,20 @@ It regenerates: per‑token int4 **~15–57×** worse perplexity → per‑chann
 
 ```mermaid
 flowchart TD
-    A[Qwen2.5-0.5B attention] --> B[KV cache extraction]
-    B --> C[Rotation: Haar / RHT / Identity]
-    B --> D[int4 quantization]
-    D --> E[per-token K/V]
-    D --> F[per-channel keys]
-    B --> G[QJL sketch]
-    B --> H[Triton fused int4 kernels]
-    G --> I[Retrieval / FAISS experiments]
+    A["Qwen2.5-0.5B attention"] --> B["KV cache extraction"]
+    B --> C["Rotation: Haar / RHT / Identity"]
+    B --> D["int4 quantization"]
+    D --> E["per-token K/V"]
+    D --> F["per-channel keys"]
+    B --> G["QJL sketch"]
+    B --> H["Triton fused int4 kernels"]
+    G --> I["Retrieval / FAISS experiments"]
 
-    E --> J[perplexity ratio]
+    E --> J["perplexity ratio"]
     F --> J
-    G --> K[inner-product bias + attention variance]
-    H --> L[latency + memory]
-    I --> M[recall@10 + bytes/vector]
+    G --> K["inner-product bias + attention variance"]
+    H --> L["latency + memory"]
+    I --> M["recall@10 + bytes/vector"]
 ```
 
 ## Why this matters
