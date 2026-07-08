@@ -1,6 +1,6 @@
 # KV‑cache quantization from scratch: rotation, int4, QJL, and the benchmark traps
 
-> *aka "Spin It, Then Squish It."* A hands‑on **ML systems** case study inspired by
+> *aka "KV-cache quantization from scratch: rotation, int4, QJL, and the benchmark traps."* A hands‑on **ML systems** case study inspired by
 > [**TurboQuant**](https://arxiv.org/abs/2504.19874), run end‑to‑end on a real model
 > (**Qwen2.5‑0.5B‑Instruct**) and a real GPU (**A100‑80GB**).
 >
