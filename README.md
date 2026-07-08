@@ -1,17 +1,78 @@
-# Spin It, Then Squish It — a hands‑on study of rotated int4 KV caches
+# KV‑cache quantization from scratch: rotation, int4, QJL, and the benchmark traps
 
-> **TL;DR** I read the [**TurboQuant**](https://arxiv.org/abs/2504.19874) paper and then spent a week
-> stress‑testing its core idea on a *real* language model (Qwen2.5‑0.5B) on a *real* A100 GPU.
-> Along the way I found a textbook "your benchmark is lying to you" trap, confirmed the paper's most
-> subtle claim (that minimizing reconstruction error is **not** the same as preserving attention),
-> learned why a clever int4 GPU kernel can be *correct, memory‑saving, and still 12–48× slower* than
-> just doing the boring thing — and then **turned a 55× failure into a 1.01× near‑lossless result** by
-> reading what the methods that actually work do differently. Then I implemented the field's full
-> eight‑step recipe and found **three independent ways** to rescue the same failure. Every number below
-> was measured, and every plot regenerates from committed data.
+> A hands‑on **ML systems** case study inspired by [**TurboQuant**](https://arxiv.org/abs/2504.19874),
+> run end‑to‑end on a real model (**Qwen2.5‑0.5B‑Instruct**) and a real GPU (**A100‑80GB**).
 
-This repo is a **portfolio / lab notebook**, not a library you should deploy. The goal is to *show
-the work*: the wins, the dead‑ends, the bugs, and the honest negative results.
+## What this repo proves
+
+I implemented, from scratch, a full KV‑cache quantization stack and stress‑tested it end‑to‑end:
+
+- a **rotated int4 KV cache** for Qwen2.5‑0.5B (rotate‑query identity; per‑token **and** per‑channel quant)
+- **QJL** residual + direct sign sketches for unbiased inner‑product estimates
+- **fused Triton int4 attention kernels** (nibble unpack in‑register, no full dequant)
+- **retrieval experiments** with FAISS
+
+**The headline result.** Naive **per‑token** int4 KV looked *near‑lossless* on repeated text — then
+failed badly on real WikiText (**15–57× worse perplexity**). Switching the **keys to per‑channel**
+quantization flipped that to **~1.01–1.03× of BF16** (near‑lossless) — a 15–55× improvement from one
+principled change.
+
+**The deeper lesson.** KV quantization is not one trick. The outcome depends on the **evaluation data**,
+the **key/value statistics**, **RoPE placement**, **outlier handling**, the **GPU kernel path**, and —
+the through‑line of the whole project — whether the **downstream consumer tolerates bias or variance**.
+
+## Results at a glance
+
+| Experiment | What I tested | Result | Lesson |
+| --- | --- | --- | --- |
+| **Repeated vs real text** | per‑token int4 KV on repeated text vs WikiText | repeated text hid the failure; real text exposed **15–57×** worse perplexity | bad eval data can make quantization look "solved" |
+| **Per‑channel keys** | same eval, but keys quantized *per channel* | perplexity ratio → **~1.01–1.03× BF16** | key *outlier channels* dominate KV quantization |
+| **QJL residual** | inner‑product bias correction | bias dropped strongly, but **variance** remained | unbiased ≠ automatically useful for softmax attention |
+| **Triton int4 kernel** | fused int4 attention vs BF16/cuBLAS | correct and memory‑saving, but **slower at head_dim=64** | compression ≠ speed |
+| **Retrieval transfer** | the same QJL sketch inside FAISS retrieval | **shortlist‑then‑rerank absorbed** the sketch variance | QJL is more natural for retrieval than dense attention |
+
+## Verify the headline result
+
+Don't run the whole repo — reproduce the headline (per‑token vs per‑channel keys) from committed CSVs:
+
+```bash
+pip install -r requirements.txt
+python benchmarks/report_m7.py     # → results/plots/m7_per_channel_fix.png + results/tables/m7_gate.md
+```
+
+It regenerates: per‑token int4 **~15–57×** worse perplexity → per‑channel keys **~1.01–1.03× BF16**.
+(Full reproduction — every CPU plot and the A100 jobs — is in [§6](#6-reproduce-it).)
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A[Qwen2.5-0.5B attention] --> B[KV cache extraction]
+    B --> C[Rotation: Haar / RHT / Identity]
+    B --> D[int4 quantization]
+    D --> E[per-token K/V]
+    D --> F[per-channel keys]
+    B --> G[QJL sketch]
+    B --> H[Triton fused int4 kernels]
+    G --> I[Retrieval / FAISS experiments]
+
+    E --> J[perplexity ratio]
+    F --> J
+    G --> K[inner-product bias + attention variance]
+    H --> L[latency + memory]
+    I --> M[recall@10 + bytes/vector]
+```
+
+## Why this matters
+
+Long‑context inference is usually bottlenecked by **KV‑cache memory**, not model weights. Compressing the
+cache can unlock longer context or larger batches — but the quality/speed trade‑offs are subtle. This
+project shows why an "obvious" int4 cache actually depends on the **quantization axis**, the
+**key/value statistics**, the **attention objective**, and the **GPU kernel path** — and where the same
+idea pays off (retrieval) versus where it doesn't (dense attention).
+
+> This repo is a **case study**, not a library to deploy: it shows the wins, the dead‑ends, the bugs, and
+> the honest negative results — every number measured, every plot regenerable from committed data.
 
 ---
 
@@ -275,7 +336,12 @@ explodes. And because the sketch forbids flash‑attention, the manual path mate
 > saves the JL sketch for **retrieval**, where there's no per‑channel scale to lean on. This turns
 > Finding 6's tentative "QJL costs more bits" into a measured, end‑to‑end verdict.
 
-### Finding 8 — The sequel: QJL's home really *is* retrieval
+---
+
+> **Part II — the sequel.** Findings 1–7 were all about the KV cache. This last one takes the *same* QJL
+> estimator into a different downstream system — vector retrieval — and gets the *opposite* result.
+
+### Finding 8 — The same estimator, flipped by the downstream system
 
 Finding 7 ended on a prediction — the sketch that dies in attention should thrive in vector search. So I
 tested it: the **exact same** QJL sketch dropped into FAISS, across five datasets (four synthetic + real
@@ -366,8 +432,9 @@ per‑channel keys, keeping the one outlier layer in BF16, or a handful of fp16 
 turn the 55× failure near‑lossless, while non‑uniform quantization cutting reconstruction error *without*
 helping attention is the MSE≠inner‑product lesson a third time. Finally, wiring the unbiased QJL sketch
 into real generation (Finding 7) fails where the numbers promised it might: unbiased‑but‑noisy logits
-wreck softmax attention over thousands of keys, so **per‑channel int4 stays the answer** and QJL belongs
-in retrieval — low variance beats zero bias. And that prediction held: the very same sketch, given
+wreck softmax attention over thousands of keys, so **per‑channel int4 stays the answer**; *in this
+Qwen2.5‑0.5B, head_dim=64 setup*, QJL is the wrong tool for dense attention but a natural fit for
+retrieval, where low variance beats zero bias. And that prediction held: the very same sketch, given
 retrieval's **shortlist‑then‑verify** instead of a one‑shot softmax, is near‑lossless at 24–47×
 compression and beats the field's sign‑LSH by up to 5× (Finding 8) — the bias–variance lesson, run in
 reverse.
@@ -414,14 +481,26 @@ is in [`results/runs.md`](results/runs.md).
 
 - One model (0.5B) on one GPU (A100). Trends should hold but absolute numbers won't transfer blindly.
 - `head_dim=64` is the worst case for a custom kernel beating cuBLAS; bigger heads would narrow the gap.
-- QJL is now wired **end‑to‑end** (Finding 7), not just a numeric study — and the honest result is that
-  it's the wrong tool for dense KV attention at this head size (unbiased but too high‑variance); its
-  home is retrieval — **confirmed in Finding 8**, where the same sketch is near‑lossless. Per‑channel
-  int4 remains the recommended cache.
+- QJL is now wired **end‑to‑end** (Finding 7), not just a numeric study. The honest result, *for this
+  Qwen2.5‑0.5B, head_dim=64 setup*: QJL is the wrong tool for dense KV attention (unbiased but too
+  high‑variance), yet a natural fit for retrieval — **Finding 8**, where shortlist‑then‑rerank absorbs
+  that variance and the same sketch is near‑lossless. Per‑channel int4 remains the recommended cache.
 - The "dense" (Haar) rotation is included as a *control* — it has great reconstruction but breaks
   attention, which is itself a nice illustration of Finding 3.
 
-## 8. Repo map
+## 8. What I would do differently next
+
+- **Scale up:** a larger model with a larger `head_dim` — where a fused int4 kernel has room to beat
+  cuBLAS and the rotation/quant trade‑offs shift.
+- **Broaden evaluation** beyond WikiText‑2 (more corpora + downstream tasks); Finding 2 is precisely
+  about eval data hiding failures.
+- **Benchmark head‑to‑head against production KV‑quant** (KIVI, KVQuant, vLLM FP8), not just my own baselines.
+- **Wire pre‑RoPE key quantization into the end‑to‑end cache path**, not only the KL study.
+- **Replace the educational Triton kernel** with a fully tensor‑core‑oriented implementation.
+- **Map the throughput regimes** (batch size × max context) where the memory savings actually convert
+  into higher tokens/sec.
+
+## 9. Repo map
 
 ```
 turbo_kv/      rotations · quantizers · packing · cache · qwen_patch · qjl · metrics · reporting
@@ -434,7 +513,7 @@ tests/         pytest — pure-math on CPU, GPU/Triton tests auto-skip
 PLAN.md        the original milestone plan (M0–M6) I worked to
 ```
 
-## 9. Credits
+## 10. Credits
 
 - **Paper:** *TurboQuant: Online Vector Quantization with Near‑optimal Distortion Rate* — arXiv:[2504.19874](https://arxiv.org/abs/2504.19874).
 - Related ideas I leaned on: QuaRot / Hadamard incoherence processing, KIVI (per‑channel keys),
