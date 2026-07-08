@@ -312,9 +312,41 @@ spread, exactly as in the KV cache. I never forked FAISS's C++: "rotate‑before
 FAISS via its composable `IndexPreTransform`, and the QJL scorer is ~30 lines reusing the same
 [`qjl.py`](turbo_kv/qjl.py) that failed for attention.
 
-> **Lesson:** it was never the estimator — it's *how you use the scores*. A one‑shot softmax **amplifies**
-> variance; shortlist‑then‑verify **absorbs** it. The same unbiased‑but‑noisy sketch is poison for the
-> first and near‑perfect for the second.
+### The one idea underneath all eight findings: bias vs variance
+
+Strip away the transformer and the vector database, and the whole project collapses to a single lesson
+about *how estimates fail*.
+
+There are two ways to be wrong. **Bias** is a *consistent* error — a bathroom scale that always reads
+2 kg heavy. **Variance** is a *random* one — a scale that jitters ±5 kg each time you step on it, but is
+right on average. On an archery target: biased is a tight cluster off to the left; high‑variance is
+arrows sprayed all around the bullseye but *centred* on it. The two quantizers sit at opposite corners —
+**int4 is biased but stable; QJL is unbiased but noisy.** QJL "fixes" the bias and pays for it in variance.
+
+Now the only question that matters — *does the right answer still win?* Say the correct key truly scores
+**10** and a distractor scores **9**:
+
+- **Biased int4** returns ~**10.5** vs ~**9.5**: shifted, but the *order holds* (ranking cares about
+  *differences*, and a constant shift cancels). The right key wins.
+- **Unbiased QJL** returns **10 ± 3** vs **9 ± 3**: one unlucky draw gives **8** vs **11**, and the
+  *wrong* key wins. And across *thousands* of distractors, some will spike above the true score by pure
+  chance — the noise never averages away, it just hands every distractor a lottery ticket.
+
+That single difference explains both halves of the project:
+
+- **Attention amplifies variance.** It scores *every* key, `softmax`‑blends *all* of them into one output
+  in a single shot, uses it immediately, and repeats every layer — no verification, so the noise
+  compounds into 37–2316× worse perplexity. It's like hiring by averaging all 100,000 résumés weighted by
+  a noisy five‑second glance, and never interviewing anyone.
+- **Retrieval absorbs variance.** It *shortlists, then verifies*: the noisy score keeps a wide top‑100
+  pool, then **exact** re‑ranking picks the true top‑10. The noise only has to get the real neighbours
+  *into the net*; exact math does the rest → near‑lossless recall. That's the noisy résumé screen
+  shortlisting 100 candidates, then **real interviews** choosing the final 10 — you'd never interview all
+  100,000, and never trust the screen alone.
+
+> **The whole project in one line:** it was never the estimator — it's *how you use the scores*. A
+> one‑shot softmax amplifies variance; shortlist‑then‑verify absorbs it. **Unbiased‑but‑noisy is poison
+> for the first and perfect for the second.**
 
 ---
 
