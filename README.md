@@ -1,7 +1,11 @@
 # KV‑cache quantization from scratch: rotation, int4, QJL, and the benchmark traps
 
-> A hands‑on **ML systems** case study inspired by [**TurboQuant**](https://arxiv.org/abs/2504.19874),
-> run end‑to‑end on a real model (**Qwen2.5‑0.5B‑Instruct**) and a real GPU (**A100‑80GB**).
+> *aka "Spin It, Then Squish It."* A hands‑on **ML systems** case study inspired by
+> [**TurboQuant**](https://arxiv.org/abs/2504.19874), run end‑to‑end on a real model
+> (**Qwen2.5‑0.5B‑Instruct**) and a real GPU (**A100‑80GB**).
+>
+> **Not a full reproduction of the TurboQuant paper** — a *mechanism‑level* study inspired by it:
+> rotation, scalar int4 quantization, QJL residuals, KV‑cache evaluation, and retrieval transfer.
 
 ## What this repo proves
 
@@ -23,13 +27,13 @@ the through‑line of the whole project — whether the **downstream consumer to
 
 ## Results at a glance
 
-| Experiment | What I tested | Result | Lesson |
+| Question | Experiment | Result | Lesson |
 | --- | --- | --- | --- |
-| **Repeated vs real text** | per‑token int4 KV on repeated text vs WikiText | repeated text hid the failure; real text exposed **15–57×** worse perplexity | bad eval data can make quantization look "solved" |
-| **Per‑channel keys** | same eval, but keys quantized *per channel* | perplexity ratio → **~1.01–1.03× BF16** | key *outlier channels* dominate KV quantization |
-| **QJL residual** | inner‑product bias correction | bias dropped strongly, but **variance** remained | unbiased ≠ automatically useful for softmax attention |
-| **Triton int4 kernel** | fused int4 attention vs BF16/cuBLAS | correct and memory‑saving, but **slower at head_dim=64** | compression ≠ speed |
-| **Retrieval transfer** | the same QJL sketch inside FAISS retrieval | **shortlist‑then‑rerank absorbed** the sketch variance | QJL is more natural for retrieval than dense attention |
+| Can naive int4 KV look good? | repeated text vs WikiText | repeated text hid the failure; WikiText exposed **15–57×** worse perplexity | bad eval data can make quantization look "solved" |
+| What fixed the failure? | per‑token keys vs **per‑channel** keys | **55.7× → 1.01×** at 16k context | key *outlier channels* dominate KV quantization |
+| Does QJL help attention? | end‑to‑end QJL attention path | bias improved, but **variance** made perplexity much worse | unbiased is not automatically useful under softmax |
+| Does QJL help retrieval? | FAISS shortlist‑then‑rerank | **near‑lossless** recall at **24–47× compression** | retrieval can absorb sketch variance |
+| Does int4 make decode faster? | Triton fused int4 vs BF16/cuBLAS | lower memory, but **12–48× slower** at head_dim=64 | compression is not automatically speed |
 
 ## Verify the headline result
 
@@ -292,7 +296,9 @@ The rest of the toolbox, measured honestly:
   the *retrieval* regime where you can't store per‑channel scales.
 - **A tensor‑core int4 kernel**: reconstructing the key tile to bf16 *in‑SRAM* and using the tensor
   cores finally beats my Finding‑4 kernel by **1.2–1.3×** at every shape — yet cuBLAS bf16 still wins.
-  Finding 4 stands: at `head_dim=64`, int4 is a *memory* play, not a *speed* one.
+  Finding 4 stands: *in this Qwen2.5‑0.5B, head_dim=64, A100 setup*, int4 KV behaved as a **memory**
+  optimization, not a **speed** one — larger heads or a production int4 tensor‑core kernel (KVQuant /
+  Marlin‑class) could change that.
 
 > **Lesson:** the field's recipe isn't one clever trick — it's a **stack** of refinements, and several of
 > them *independently* rescue the same failure. Reproducing a paper means reproducing its whole
