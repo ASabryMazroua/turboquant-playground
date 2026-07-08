@@ -1,11 +1,10 @@
-# KV‑cache quantization from scratch: rotation, int4, QJL, and the benchmark traps
+# KV-cache quantization from scratch: rotation, int4, QJL, and the benchmark traps
 
-> *aka "Spin It, Then Squish It."* A hands‑on **ML systems** case study inspired by
-> [**TurboQuant**](https://arxiv.org/abs/2504.19874), run end‑to‑end on a real model
-> (**Qwen2.5‑0.5B‑Instruct**) and a real GPU (**A100‑80GB**).
->
-> **Not a full reproduction of the TurboQuant paper** — a *mechanism‑level* study inspired by it:
-> rotation, scalar int4 quantization, QJL residuals, KV‑cache evaluation, and retrieval transfer.
+> *aka "Spin It, Then Squish It."*
+
+A hands-on **ML systems** case study inspired by [**TurboQuant**](https://arxiv.org/abs/2504.19874), run end-to-end on a real model (**Qwen2.5-0.5B-Instruct**) and a real GPU (**A100-80GB**).
+
+> **Not a full reproduction of the TurboQuant paper** — a *mechanism-level* study inspired by it: rotation, scalar int4 quantization, QJL residuals, KV-cache evaluation, and retrieval transfer.
 
 ## What this repo proves
 
