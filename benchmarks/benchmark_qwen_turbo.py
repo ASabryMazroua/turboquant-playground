@@ -10,8 +10,8 @@ Validates the M4 gates on a real Qwen2.5-0.5B context at ctx ∈ {8k, 16k}:
   output (proxy for the attn-KL heatmap), turbo vs BF16.
 
 Profiler: `torch.profiler` op breakdown + `profile_memory` on one decode step,
-with NVTX ranges around prefill/decode so an outer `nsys` capture (see the AML
-yml) shows one inverse-rotation per head, not per token.
+with NVTX ranges around prefill/decode so an outer `nsys` capture (in a diagnostic run)
+shows one inverse-rotation per head, not per token.
 
 Outputs (CSV, under ``--out-dir``):
     turbo_e2e.csv        ctx × rotation × quality/latency/memory

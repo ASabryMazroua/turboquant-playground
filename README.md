@@ -478,10 +478,8 @@ python benchmarks/benchmark_qjl.py --bits 2,2.5,3,3.5,4 --sketch-mults 1,2,4
 python benchmarks/benchmark_attention_micro.py
 ```
 
-The exact A100 runs were launched on Azure ML Singularity; the job specs are in
-[`benchmarks/_aml/`](benchmarks/_aml/) as **templates** (internal IDs replaced with
-`<PLACEHOLDERS>`). The full PASS/FAIL history — including every failed attempt and what it taught me —
-is in [`results/runs.md`](results/runs.md).
+The exact A100 runs were single‑GPU jobs on an **A100‑80GB** node. The full PASS/FAIL history —
+including every failed attempt and what it taught me — is in [`results/runs.md`](results/runs.md).
 
 ## 7. Honest limitations
 
@@ -512,7 +510,6 @@ is in [`results/runs.md`](results/runs.md).
 turbo_kv/      rotations · quantizers · packing · cache · qwen_patch · qjl · metrics · reporting
 kernels/       fused int4 Triton kernels (logits, values) + PyTorch references
 benchmarks/    one script per experiment + report_mN.py plot/table generators
-  _aml/        Azure ML A100 job specs (scrubbed templates)
 retrieval/     FAISS multi‑dataset quality·latency·RAM benchmark + QJL scorer (Finding 8)
 results/       *.csv · plots/ · tables/ · runs.md (the lab notebook)
 tests/         pytest — pure-math on CPU, GPU/Triton tests auto-skip

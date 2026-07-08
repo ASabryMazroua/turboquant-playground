@@ -17,12 +17,12 @@ Legend: ⬜ not started · 🟡 in progress · 🔵 awaiting Codex review · ✅
 - [x] Create repo structure (PLAN Section 10)
 - [x] Add `pyproject.toml`/`requirements.txt` (`torch`, `transformers`, `triton`, `azure-ai-ml`, `azure-identity`, `pandas`, `matplotlib`, `pynvml`)
 - [x] Scaffold `turbo_kv/reporting.py` + `benchmarks/profiling/` (nvml_sampler, mem_snapshot, nsys/ncu wraps)
-- [x] Adapt `benchmarks/_aml/submit_job_sdk.py` from ContentPlusCommerce
+- [x] Adapt the cloud-job submission script (Azure ML Python SDK)
 - [x] Write `benchmarks/_aml/hello_gpu.py` + `hello-a100-1gpu.yml`
 - [x] `az ml` CLI working locally
-- [x] Submit hello job — **note:** derived `ND12amrs_A100_v4` is INVALID ("instanceType is invalid"); valid SKU is 4-GPU `Singularity.ND48am_A100_v4`, 1 GPU via `CUDA_VISIBLE_DEVICES=0`
+- [x] Submit hello job — **note:** an over-derived instance-type name was rejected ("instanceType is invalid"); used a valid 4-GPU A100-80GB node, 1 GPU via `CUDA_VISIBLE_DEVICES=0`
 - [x] **Gate PASS:** logs show `NVIDIA A100-SXM4-80GB` (79.2 GB) + `torch.cuda.is_available()` True + Triton 2.2.0 imports
-- [~] **Gate (partial):** `ncu` available ✅; **`nsys` NOT in the ACPT image** ⚠️ — must `apt-get install` nsys (or use a Nsight-bundled image) before M4/M5 timelines
+- [~] **Gate (partial):** `ncu` available ✅; **`nsys` NOT in the base CUDA image** ⚠️ — must `apt-get install` nsys (or use a Nsight-bundled image) before M4/M5 timelines
 - [x] Log job URL + device banner to `results/runs.md` (job `yellow_car_ph79x24pr7`)
 - [ ] 🔵 Codex review → ✅ your approval  ← **current gate**
 

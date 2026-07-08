@@ -1,6 +1,6 @@
 """Unit tests for turbo_kv.rotations (M2 gate: RRᵀ=I, Hadamard correctness).
 
-Run on a torch-enabled env (AML): ``python -m pytest tests/ -q``.
+Run on a torch-enabled env (GPU): ``python -m pytest tests/ -q``.
 """
 import math
 

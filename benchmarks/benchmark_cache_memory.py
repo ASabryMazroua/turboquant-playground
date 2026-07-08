@@ -6,7 +6,7 @@ reading the allocator delta. The BF16 measured-vs-closed-form gap must be within
 ~5% (an M1 validation gate). Also tabulates the theoretical int4 / 3-bit
 reductions.
 
-Runs on the A100 AML node; writes ``outputs/kv_bytes.csv``. Falls back to a
+Runs on an A100 GPU node; writes ``outputs/kv_bytes.csv``. Falls back to a
 config-only (no-CUDA) closed-form table if CUDA is unavailable.
 """
 from __future__ import annotations

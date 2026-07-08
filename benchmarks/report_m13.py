@@ -9,7 +9,7 @@ coordinate magnitude varies; the cost is a small amount of extra scale storage
 IS the KIVI residual buffer — recent tokens kept full precision and evicted in
 chunks — already implemented in the cache.
 
-Expected CSV columns (the AML job writes ``turbo_e2e.csv``; rename on download to
+Expected CSV columns (the GPU job writes ``turbo_e2e.csv``; rename on download to
 ``turbo_e2e_valuegroup.csv``):
     ctx, key_quant, value_group_size, ppl_bf16, ppl_turbo, ppl_ratio,
     tf_kl, tf_argmax_match, peak_mb_turbo

@@ -1,6 +1,6 @@
 """M1 reporting: turn the A100 baseline CSVs into the PLAN §8·M1 plots + tables.
 
-Run **locally** after downloading the AML job's ``outputs/`` into ``results/``:
+Run **locally** after downloading the GPU job's ``outputs/`` into ``results/``:
 
     python benchmarks/report_m1.py --results results
 
@@ -183,7 +183,7 @@ def main() -> int:
 
     baseline = results / "baseline.csv"
     if not baseline.exists():
-        print(f"ERROR: {baseline} not found — download the AML job outputs first.")
+        print(f"ERROR: {baseline} not found — download the GPU job outputs first.")
         return 2
     df = pd.read_csv(baseline)
 

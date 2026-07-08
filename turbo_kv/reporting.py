@@ -3,7 +3,7 @@
 Every milestone writes rows via :func:`append_row` to ``results/*.csv`` and then
 renders artifacts through the helpers here, so figures and tables always
 regenerate from the CSVs (no hand-built artifacts). A headless matplotlib
-backend is used so this runs unchanged inside an AML job.
+backend is used so this runs unchanged inside a cloud GPU job.
 """
 from __future__ import annotations
 

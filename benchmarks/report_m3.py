@@ -1,6 +1,6 @@
 """M3 local report — render plots & tables from the TurboKVCache CSVs.
 
-Reads ``results/{turbo_mse,turbo_memory_kv}.csv`` (downloaded from the AML job)
+Reads ``results/{turbo_mse,turbo_memory_kv}.csv`` (downloaded from the GPU job)
 and writes the M3 artifacts: theoretical-vs-measured KV-bytes bars, the
 memory-&-quality-vs-``residual_length`` tradeoff, a stored-bytes breakdown, plus
 the gate summary. matplotlib is local-only.

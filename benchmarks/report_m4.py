@@ -1,7 +1,7 @@
 """M4 local report — render plots & tables from the patched-attention CSVs.
 
 Reads ``results/{turbo_e2e,turbo_layer_kl,turbo_ops}.csv`` (downloaded from the
-AML job) and writes the M4 artifacts: quality-vs-rotation×ctx, perplexity ratio,
+GPU job) and writes the M4 artifacts: quality-vs-rotation×ctx, perplexity ratio,
 decode-ms/tok & peak-mem (BF16 vs TurboKV), a per-layer attention-output
 divergence heatmap, the decode op breakdown, comparison tables and the gate.
 

@@ -1,6 +1,6 @@
 """Reference-equality tests for the tensor-core int4 logits kernel (M15).
 
-Needs a GPU + Triton, so skipped on CPU-only machines (runs in the AML job).
+Needs a GPU + Triton, so skipped on CPU-only machines (runs in the GPU job).
 The tensor-core kernel reconstructs the key tile to bf16 and contracts with
 ``allow_tf32=True``, so it is checked against the M5 fp32 dequant reference with
 a LOOSER tolerance (relerr < 1e-2) than the exact M5 kernel (1e-3).

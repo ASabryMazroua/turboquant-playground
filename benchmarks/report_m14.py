@@ -10,7 +10,7 @@ per-channel scheme already does the heavy lifting on the outlier key channels, s
 a small fp16 sink is a cheap complement that should not hurt (and ideally helps at
 the largest context), while for per-token keys the sink alone stays insufficient.
 
-Expected CSV columns (the AML job writes ``turbo_e2e.csv``; rename on download to
+Expected CSV columns (the GPU job writes ``turbo_e2e.csv``; rename on download to
 ``turbo_e2e_sink.csv``):
     ctx, key_quant, sink_length, ppl_bf16, ppl_turbo, ppl_ratio,
     tf_kl, tf_argmax_match

@@ -9,7 +9,7 @@ use the full int4 grid. The cost is real sparse fp16 memory
 (``n_outliers*(2 idx + 2 val)`` bytes/token), so the win is quality-traded-against-
 memory.
 
-Expected CSV columns (the AML job writes ``turbo_e2e.csv``; rename on download to
+Expected CSV columns (the GPU job writes ``turbo_e2e.csv``; rename on download to
 ``turbo_e2e_outliers.csv``):
     ctx, key_quant, key_outliers, ppl_bf16, ppl_turbo, ppl_ratio,
     tf_kl, tf_argmax_match, peak_mb_turbo

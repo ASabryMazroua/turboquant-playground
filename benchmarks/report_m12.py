@@ -1,6 +1,6 @@
 """M12 local report — NUQ vs uniform from the non-uniform-quant sweep CSV.
 
-Reads ``results/turbo_nuq.csv`` (downloaded from the AML job) and writes plots,
+Reads ``results/turbo_nuq.csv`` (downloaded from the GPU job) and writes plots,
 an error matrix, and a gate. matplotlib is only needed here (local), never in
 the metric library.
 

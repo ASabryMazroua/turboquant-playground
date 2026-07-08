@@ -1,8 +1,8 @@
 # `turbo-kv-lab` — Project Plan (for sign-off)
 
 > A small, rigorous repo that implements and **profiles** a TurboQuant-style
-> quantized KV cache for one small causal LM on **A100 80GB** (via AML
-> Singularity). The portfolio value is the path: *paper idea → measured decode
+> quantized KV cache for one small causal LM on **A100 80GB** (a single
+> cloud GPU). The portfolio value is the path: *paper idea → measured decode
 > bottleneck → low-bit rotated cache → fused int4 attention kernel → honest
 > tradeoff table*.
 
@@ -17,7 +17,7 @@ off Section 0.** After that, work proceeds one milestone at a time:
 For each milestone Mi:
   1. Implement deliverables
   2. Run validation gates (record PASS/FAIL + evidence — including failures)
-  3. Submit the A100 job(s) on AML, capture job URL + result CSVs
+  3. Submit the A100 job(s), capture the job URL + result CSVs
   4. Generate the milestone's plots + comparison tables (§8) from those CSVs
   5. Pause → Codex reviews the output → you approve → next milestone
 ```
@@ -117,30 +117,26 @@ $O(d \log d)$ instead of $O(d^2)$, keeps the "spread the energy" property.
 
 ---
 
-## 5. Platform — A100 80GB via AML Singularity (verified recipe)
+## 5. Platform — A100 80GB (single-GPU cloud jobs)
 
-Derived from `ContentPlusCommerce/Experiments/AML` (verified working setup). Full
-copy-paste recipe in **Appendix A**.
+Every experiment is a **single-GPU job on an A100-80GB node**. The orchestration around it (job
+submission, compute pool, container image, credentials) is provider-specific and intentionally left out
+of this public repo — swap in your own cloud GPU or a local A100. What matters for reproducibility is
+provider-agnostic and captured by the `python benchmarks/...` commands (README §6), which run on **any
+CUDA GPU**.
 
 | Field | Value |
 |-------|-------|
-| Subscription | `<SUBSCRIPTION_ID>` (WebXT Shopping Singularity) |
-| Resource group | `<RESOURCE_GROUP>` |
-| Workspace | `<WORKSPACE>` |
-| Virtual cluster | `<VIRTUAL_CLUSTER>` |
-| **A100 instance (single-GPU work)** | `Singularity.ND48am_A100_v4` (4-GPU node — smallest **valid** SKU in this VC; pin to 1 GPU via `CUDA_VISIBLE_DEVICES=0`) |
-| A100 instances (portal-verified) | 8-GPU `Singularity.ND96amrs_A100_v4`, 4-GPU `Singularity.ND48am_A100_v4` / `ND48amr_A100_v4-n1`. **Derived `ND12`/`ND24` names are INVALID** ("instanceType is invalid", verified by job `teal_berry_qfq7f822wr`). |
-| SLA tier | `Standard` (no Premium A100 in this VC) |
-| Environment | **CUDA** ACPT image `mcr.microsoft.com/aifx/acpt/stable-ubuntu2004-cu121-py310-torch22x:biweekly.202410.1` + pip `torch/transformers/triton` (NOT the ROCm images used for MI300X) |
-| Submit | `az ml job create --file <job>.yml` **or** Python SDK `submit_job_sdk.py` |
-| Data | No node internet → stage model+data to datastore `shopping_prod_c09` under `local/Retail/...`, mount as `uri_folder` |
+| GPU | A100-80GB, single GPU (pin one GPU of a multi-GPU node via `CUDA_VISIBLE_DEVICES=0`) |
+| Environment | a **CUDA** PyTorch image (CUDA 12.1 / Python 3.10 / torch 2.2.x) + pip `transformers` / `triton` |
+| Submit | your cloud's job API/CLI, or run the `python benchmarks/...` commands directly on a GPU box |
+| Model / data | Qwen2.5-0.5B-Instruct + eval data from your model storage (HF Hub / local disk / cloud) |
 
-**Known gotchas (baked into every job):**
-- YAML folded-scalar trap: keep each `python` invocation on **one** line under `command: >-`.
-- A100 ⇒ use **CUDA** env vars, never `PYTORCH_ROCM_ARCH`/`HSA_OVERRIDE_GFX_VERSION`.
-- Custom image ⇒ set `SINGULARITY_CUSTOM_IMAGE: "true"` and `SINGULARITY_CUSTOM_IMAGE_COMMANDS: "USER root"`.
-- Always include the UAI env var `_AZUREML_SINGULARITY_JOB_UAI` and `AZUREML_COMPUTE_USE_COMMON_RUNTIME: "true"`.
-- Single A100 80GB is enough for everything here (0.5B model); multi-GPU is out of scope.
+**Known gotchas (hardware/CUDA, provider-agnostic):**
+- A100 ⇒ use **CUDA** env vars, never the ROCm `PYTORCH_ROCM_ARCH` / `HSA_OVERRIDE_GFX_VERSION`.
+- Pin `torch`/`torchvision`/`torchaudio` via a pip constraints file so `transformers`/quant deps can't
+  silently upgrade the CUDA build.
+- A single A100-80GB is enough for everything here (0.5B model); multi-GPU is out of scope.
 
 ---
 
@@ -148,9 +144,8 @@ copy-paste recipe in **Appendix A**.
 
 **Qwen2.5-0.5B-Instruct** — small, modern, HF-compatible, **GQA**, long context to
 **32,768** tokens. GQA matters: the KV cache has `num_kv_heads < num_attn_heads`, so
-quantizing K/V is exactly where the memory is. Stage the **base instruct** weights to
-the datastore (distinct from the fine-tuned product-extraction Qwen2.5-0.5B already
-present in the workspace datastore).
+quantizing K/V is exactly where the memory is. Use the **base instruct** weights (from the
+Hugging Face Hub or local disk).
 
 ---
 
@@ -215,7 +210,7 @@ and its **Profiler + Artifacts** (cross-referencing §7 and §8). Status starts 
   `turbo_kv/reporting.py` + `benchmarks/profiling/` scaffold; `benchmarks/_aml/hello_gpu.py` +
   `hello-a100-1gpu.yml`.
 - **A100 job:** run `python -c "import torch; print(torch.cuda.get_device_name())"`
-  + `nvidia-smi` on `Singularity.ND12amrs_A100_v4`.
+  + `nvidia-smi` on an A100-80GB node.
 - **Validation gates:**
   - PASS if job reaches **Completed** and logs show **"NVIDIA A100 80GB"**.
   - PASS if `torch.cuda.is_available()` is True and Triton imports.
@@ -331,11 +326,6 @@ turbo-kv-lab/
       mem_snapshot.py          # record_memory_history -> snapshot.pickle
       nsys_wrap.sh             # Nsight Systems capture (+ NVTX ranges)
       ncu_wrap.sh              # Nsight Compute per-kernel roofline
-    _aml/
-      hello_gpu.py
-      hello-a100-1gpu.yml
-      turbo-bench-1gpu.yml
-      submit_job_sdk.py        # adapted from ContentPlusCommerce
   turbo_kv/
     rotations.py
     quantizers.py
@@ -384,61 +374,24 @@ turbo-kv-lab/
 
 | Risk | Mitigation |
 |------|-----------|
-| 1-GPU A100 SKU name rejected | Fall back to portal-verified 8-GPU `ND96amrs` node, use 1 GPU; record in `runs.md`. |
-| No node internet for weights | Stage Qwen2.5-0.5B-Instruct + eval data to `shopping_prod_c09` datastore, mount as `uri_folder`. |
+| A GPU instance-type name is rejected by the scheduler | Fall back to a portal-verified A100 node, use 1 GPU; record in `runs.md`. |
+| No node internet for weights | Stage Qwen2.5-0.5B-Instruct + eval data to your model storage and mount it. |
 | int4 fusion doesn't beat BF16 latency on A100 | Expected per HF guidance; the **memory** win is the headline, latency reported honestly. |
 | Triton kernel correctness drift | Gate every kernel against a PyTorch reference with fixed atol/rtol before benchmarking. |
 | GQA head bookkeeping bugs | Add shape assertions on `[B, num_kv_heads, T, head_dim]` throughout. |
 | Heavy profiler skews headline latency | Take ms/token with CUDA events only; run `torch.profiler`/`nsys`/`ncu` on **separate** diagnostic passes (§7). |
-| `nsys`/`ncu` restricted on Singularity nodes | Confirm availability in M0; if blocked, fall back to `torch.profiler` + NVML and note the gap in `runs.md`. |
+| `nsys`/`ncu` restricted on some managed GPU nodes | Confirm availability in M0; if blocked, fall back to `torch.profiler` + NVML and note the gap in `runs.md`. |
 | Scope creep (vLLM/CUDA C++/multi-model) | Hard non-goals in Section 2; revisit only after M6. |
 
 ---
 
-## Appendix A — AML A100 submission recipe (copy-paste)
+## Appendix A — Running the jobs
 
-```powershell
-# one-time
-$env:PYTHONNOUSERSITE = "1"; $env:PIP_ONLY_BINARY = ":all:"
-az extension add --name ml --yes
-az login
-az account set --subscription "<SUBSCRIPTION_ID>"
-az configure --defaults group=<RESOURCE_GROUP> workspace=<WORKSPACE>
-
-# submit + monitor
-az ml job create --file benchmarks/_aml/hello-a100-1gpu.yml
-az ml job stream --name <job-name>
-az ml job show --name <job-name> --query "{Status:status, Name:name}" -o table
-```
-
-A100 CUDA command-job skeleton (single GPU):
-
-```yaml
-$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
-type: command
-experiment_name: turbo-kv-lab
-display_name: hello-a100-1gpu
-compute: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.MachineLearningServices/virtualclusters/<VIRTUAL_CLUSTER>
-environment:
-  image: mcr.microsoft.com/aifx/acpt/stable-ubuntu2004-cu121-py310-torch22x:biweekly.202410.1
-code: ./src
-command: >-
-  python -u -c "import torch; print(torch.cuda.get_device_name(0)); print(torch.cuda.is_available())" && nvidia-smi
-resources:
-  instance_count: 1
-  instance_type: Singularity.ND12amrs_A100_v4   # fallback: Singularity.ND96amrs_A100_v4 (use 1 GPU)
-  properties:
-    AISuperComputer:
-      interactive: false
-      virtualClusterArmId: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.MachineLearningServices/virtualclusters/<VIRTUAL_CLUSTER>
-      slaTier: Standard
-      priority: Medium
-environment_variables:
-  _AZUREML_SINGULARITY_JOB_UAI: /subscriptions/<SUBSCRIPTION_ID>/resourcegroups/<RESOURCE_GROUP>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<USER_ASSIGNED_IDENTITY>
-  AZUREML_COMPUTE_USE_COMMON_RUNTIME: "true"
-  SINGULARITY_CUSTOM_IMAGE: "true"
-  SINGULARITY_CUSTOM_IMAGE_COMMANDS: "USER root"
-```
+Every experiment is a single-GPU **A100-80GB** job. To reproduce, run the `python benchmarks/...`
+commands (README §6) directly on any CUDA GPU box, or wrap them in your own cloud provider's GPU job —
+the compute pool, container image, and credentials are provider-specific and out of scope here. Use a
+CUDA 12.1 / torch 2.2.x image, and pin `torch`/`torchvision`/`torchaudio` via a pip constraints file so
+the quant / `transformers` deps can't upgrade the CUDA build. Pin to one GPU with `CUDA_VISIBLE_DEVICES=0`.
 
 ---
 

@@ -1,1 +1,1 @@
-"""Benchmark package for turbo-kv-lab (importable so AML jobs can use submodules)."""
+"""Benchmark package for turbo-kv-lab (importable so batch/GPU jobs can use submodules)."""

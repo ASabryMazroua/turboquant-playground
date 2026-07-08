@@ -6,7 +6,7 @@ vs **pre-RoPE** (KVQuant: quantize the raw key, re-apply RoPE on reconstruction)
 RoPE injects position-dependent variation that hurts quantization, so pre-RoPE
 should be at least as good as post-RoPE and ideally better.
 
-Expected CSV columns (the AML job writes ``turbo_e2e.csv``; rename on download to
+Expected CSV columns (the GPU job writes ``turbo_e2e.csv``; rename on download to
 ``turbo_e2e_prerope.csv``):
     ctx, key_quant, rope_mode, ppl_bf16, ppl_turbo, ppl_ratio, tf_kl, tf_argmax_match
 

@@ -7,7 +7,7 @@ found layer 0 a huge inner-product RMSE outlier), so the harder ``per_token`` ke
 setting should benefit MORE from early-layer BF16 than the already near-lossless
 ``per_channel`` — confirming layer sensitivity — at a measurable memory cost.
 
-Expected CSV columns (the AML job writes ``turbo_e2e.csv``; rename on download to
+Expected CSV columns (the GPU job writes ``turbo_e2e.csv``; rename on download to
 ``turbo_e2e_earlylayer.csv``):
     ctx, key_quant, bf16_layers, ppl_bf16, ppl_turbo, ppl_ratio,
     tf_kl, tf_argmax_match, peak_mb_turbo

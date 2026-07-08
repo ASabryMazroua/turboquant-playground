@@ -1,7 +1,7 @@
 """Reference-equality tests for the fused int4 Triton kernels (M5).
 
 These need a GPU + Triton, so they are skipped on CPU-only machines (they run in
-the AML job). Each kernel is checked against the dequantize-then-matmul PyTorch
+the GPU job). Each kernel is checked against the dequantize-then-matmul PyTorch
 reference by relative Frobenius error.
 """
 import pytest

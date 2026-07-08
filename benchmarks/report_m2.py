@@ -1,7 +1,7 @@
 """M2 local report — render plots & tables from the rotation/quant sweep CSVs.
 
 Reads ``results/{rotation_quant_error,coord_magnitude,rotation_latency}.csv``
-(downloaded from the AML job) and writes plots + comparison tables. matplotlib
+(downloaded from the GPU job) and writes plots + comparison tables. matplotlib
 is only needed here (local), never inside the metric library.
 
 The error sweep carries a ``quant_axis`` column: **per-token** is the regime
