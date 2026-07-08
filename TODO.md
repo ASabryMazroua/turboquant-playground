@@ -105,7 +105,8 @@ Legend: ⬜ not started · 🟡 in progress · 🔵 awaiting Codex review · ✅
 - [x] Compelling undergrad-level story with 5 findings incl. the redemption; thesis written
 - [x] Embedded plots (`m2_axis_contrast`, `m4_corpus_comparison`, `m6_ip_bias_hist`, `m6_pareto`, `m5_decode`, `m7_per_channel_fix`)
 - [x] Scrubbed secrets, MIT LICENSE, requirements.txt, reproducible (`report_*.py` rebuild plots on CPU); pushed to github.com/ASabryMazroua/turboquant-playground
-- [ ] Optional: fill PLAN §11 master table; add retrieval chapter
+- [x] **Retrieval chapter (Finding 8)** — FAISS multi-dataset (aniso/iso/blobs/unit/mnist) benchmark on quality·latency·RAM: the same QJL sketch that failed for attention is near-lossless for retrieval (shortlist + exact rerank absorbs the variance). QJL beats sign-LSH/SimHash up to 5× (uses the norm; converges on unit vectors = clean proof); OPQ rotate-before-quantize wins on structured data, no-op on isotropic (the KV lesson transfers). `retrieval/bench_faiss_turbo.py` + `retrieval/report_retrieval.py`; `results/retrieval_recall.csv` (51 rows) + plots `retrieval_qjl_vs_simhash`, `retrieval_tradeoff` + `retrieval_story.md`. No FAISS C++ fork (composable `IndexPreTransform` + 30-line QJL scorer).
+- [ ] Optional: fill PLAN §11 master table
 
 ---
 

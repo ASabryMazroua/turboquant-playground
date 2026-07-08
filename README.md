@@ -68,7 +68,7 @@ single **A100‑80GB**. Each experiment is one GPU job; results are downloaded a
 
 ---
 
-## 4. Seven findings worth your time
+## 4. Eight findings worth your time
 
 ### Finding 1 — Rotation only helps if you quantize *per token*
 
@@ -275,6 +275,47 @@ explodes. And because the sketch forbids flash‑attention, the manual path mate
 > saves the JL sketch for **retrieval**, where there's no per‑channel scale to lean on. This turns
 > Finding 6's tentative "QJL costs more bits" into a measured, end‑to‑end verdict.
 
+### Finding 8 — The sequel: QJL's home really *is* retrieval
+
+Finding 7 ended on a prediction — the sketch that dies in attention should thrive in vector search. So I
+tested it: the **exact same** QJL sketch dropped into FAISS, across five datasets (four synthetic + real
+MNIST), scored on the three axes that actually decide an index — quality (recall@10), latency (queries/s),
+and RAM (bytes/vector).
+
+The thing retrieval has that attention doesn't is **shortlist, then verify**: score everything cheaply
+with the noisy sketch, keep a top‑100 candidate pool, then re‑rank those 100 with *exact* inner products.
+The variance that scrambled attention is harmless here — you only need the true neighbours *in the pool*,
+and the exact rerank fixes the order.
+
+![Same sign bits, QJL vs SimHash — the edge is the norm](results/plots/retrieval_qjl_vs_simhash.png)
+
+**1. Same sign bits, QJL beats the field's SimHash/LSH by up to 5×** — because it keeps each vector's
+norm, which decides the winner in max‑inner‑product search; SimHash throws it away. recall@10 (reranked,
+m=1024):
+
+| | aniso | blobs | mnist (real) | unit (cosine) |
+| --- | ---: | ---: | ---: | ---: |
+| **QJL** | 1.00 | 1.00 | 0.99 | 1.00 |
+| SimHash | 0.72 | 0.18 | 0.21 | 0.99 |
+
+They **converge only on `unit`** (every norm = 1) — a clean controlled proof that the *norm* is the
+mechanism.
+
+**2. The rerank absorbs the variance.** QJL's raw recall is a noisy 0.4–0.7 (the *same* high variance as
+Finding 7), but shortlist‑then‑verify lifts it to **0.97–1.00** — near‑lossless at 24–47× compression
+(MNIST: 3136 → 130 bytes/vector at 0.99 recall). Attention had no second chance; retrieval does.
+
+And the KV rotation lesson transfers verbatim: **OPQ** (rotate‑before‑quantize) is the Pareto king on
+structured data (aniso PQ 0.84 → OPQ **0.996** at 16 bytes/vector, 32× compression, *and* the fastest
+scan) yet does **nothing** on the isotropic control — rotation only helps when there's outlier energy to
+spread, exactly as in the KV cache. I never forked FAISS's C++: "rotate‑before‑quantize" runs *inside*
+FAISS via its composable `IndexPreTransform`, and the QJL scorer is ~30 lines reusing the same
+[`qjl.py`](turbo_kv/qjl.py) that failed for attention.
+
+> **Lesson:** it was never the estimator — it's *how you use the scores*. A one‑shot softmax **amplifies**
+> variance; shortlist‑then‑verify **absorbs** it. The same unbiased‑but‑noisy sketch is poison for the
+> first and near‑perfect for the second.
+
 ---
 
 ## 5. The one‑paragraph thesis
@@ -294,7 +335,10 @@ turn the 55× failure near‑lossless, while non‑uniform quantization cutting 
 helping attention is the MSE≠inner‑product lesson a third time. Finally, wiring the unbiased QJL sketch
 into real generation (Finding 7) fails where the numbers promised it might: unbiased‑but‑noisy logits
 wreck softmax attention over thousands of keys, so **per‑channel int4 stays the answer** and QJL belongs
-in retrieval — low variance beats zero bias.
+in retrieval — low variance beats zero bias. And that prediction held: the very same sketch, given
+retrieval's **shortlist‑then‑verify** instead of a one‑shot softmax, is near‑lossless at 24–47×
+compression and beats the field's sign‑LSH by up to 5× (Finding 8) — the bias–variance lesson, run in
+reverse.
 
 ## 6. Reproduce it
 
@@ -340,7 +384,8 @@ is in [`results/runs.md`](results/runs.md).
 - `head_dim=64` is the worst case for a custom kernel beating cuBLAS; bigger heads would narrow the gap.
 - QJL is now wired **end‑to‑end** (Finding 7), not just a numeric study — and the honest result is that
   it's the wrong tool for dense KV attention at this head size (unbiased but too high‑variance); its
-  home is retrieval. Per‑channel int4 remains the recommended cache.
+  home is retrieval — **confirmed in Finding 8**, where the same sketch is near‑lossless. Per‑channel
+  int4 remains the recommended cache.
 - The "dense" (Haar) rotation is included as a *control* — it has great reconstruction but breaks
   attention, which is itself a nice illustration of Finding 3.
 
@@ -351,6 +396,7 @@ turbo_kv/      rotations · quantizers · packing · cache · qwen_patch · qjl 
 kernels/       fused int4 Triton kernels (logits, values) + PyTorch references
 benchmarks/    one script per experiment + report_mN.py plot/table generators
   _aml/        Azure ML A100 job specs (scrubbed templates)
+retrieval/     FAISS multi‑dataset quality·latency·RAM benchmark + QJL scorer (Finding 8)
 results/       *.csv · plots/ · tables/ · runs.md (the lab notebook)
 tests/         pytest — pure-math on CPU, GPU/Triton tests auto-skip
 PLAN.md        the original milestone plan (M0–M6) I worked to
